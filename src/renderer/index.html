@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file: https:; media-src 'self' blob: file:; style-src 'self'; script-src 'self'">
+  <title>品味大战</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar control-surface">
+      <div class="brand-block">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div>
+          <h1>品味大战</h1>
+          <p>TASTE ARENA · LIVE</p>
+        </div>
+      </div>
+
+      <button id="importButton" class="primary-button wide-button" type="button">
+        <span class="button-icon">＋</span> 导入音频 / 视频
+      </button>
+      <button id="editTrackButton" class="ghost-button wide-button edit-track-button" type="button" disabled>编辑当前曲目信息</button>
+
+      <div class="section-heading">
+        <span>播放队列</span>
+        <span id="trackCount" class="count-badge">0 首</span>
+      </div>
+      <div id="playlist" class="playlist empty">
+        <div class="empty-playlist">
+          <div class="drop-icon">⇩</div>
+          <strong>把媒体文件拖到这里</strong>
+          <span>支持 MP3 / FLAC / WAV / MP4 / WEBM</span>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <button id="settingsButton" class="ghost-button wide-button" type="button">直播接入设置</button>
+        <div class="connection-line">
+          <span id="connectionDot" class="status-dot"></span>
+          <span id="connectionText">模拟弹幕模式</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar control-surface">
+        <div>
+          <span class="eyebrow">PROGRAM OUTPUT</span>
+          <strong>直播节目画面</strong>
+        </div>
+        <div class="top-actions">
+          <button id="exportButton" class="ghost-button" type="button">导出存档</button>
+          <button id="programModeButton" class="primary-button" type="button">进入节目模式</button>
+        </div>
+      </header>
+
+      <section id="programFrame" class="program-frame no-media">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+        <video id="mediaElement" class="stage-video" playsinline></video>
+
+        <div class="program-content">
+          <section class="track-zone">
+            <div class="round-pill">ROUND <span id="roundNumber">--</span></div>
+            <div id="coverFrame" class="cover-frame">
+              <div id="coverFallback" class="cover-fallback">
+                <div class="record-disc"><div></div></div>
+                <span>DROP A TRACK</span>
+              </div>
+              <img id="coverImage" alt="当前曲目封面">
+            </div>
+            <div class="now-playing">
+              <span>NOW PLAYING</span>
+              <h2 id="trackTitle">等待选曲</h2>
+              <p id="trackArtist">导入音频或视频开始品味大战</p>
+            </div>
+            <canvas id="visualizer" aria-label="音频频谱"></canvas>
+          </section>
+
+          <section class="interaction-zone">
+            <div class="score-card">
+              <div class="score-label">全场评分</div>
+              <div class="score-main">
+                <strong id="averageScore">—</strong>
+                <span>/ 10</span>
+              </div>
+              <div class="score-meta"><span id="scoreCount">0</span> 人已评分</div>
+              <div id="scoreMeter" class="score-meter"><i></i></div>
+            </div>
+
+            <div class="comments-card">
+              <div class="comments-title">
+                <span>实时乐评</span>
+                <i class="live-pulse"></i>
+              </div>
+              <div id="commentStream" class="comment-stream">
+                <div class="comment-placeholder">弹幕评论将在这里滚动出现</div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="instruction-strip">
+          <span>发送弹幕参与</span>
+          <strong id="scoreHint">评分：#曲目号 8.5</strong>
+          <b>·</b>
+          <strong id="commentHint">评论：#曲目号评 你的观点</strong>
+        </div>
+      </section>
+
+      <section class="control-deck control-surface">
+        <div class="transport-row">
+          <div class="transport-buttons">
+            <button id="previousButton" class="round-button" type="button" title="上一首">‹</button>
+            <button id="playButton" class="play-button" type="button" title="播放/暂停">▶</button>
+            <button id="nextButton" class="round-button" type="button" title="下一首">›</button>
+          </div>
+          <span id="currentTime">00:00</span>
+          <input id="progressInput" class="range-input progress-input" type="range" min="0" max="1000" value="0" aria-label="播放进度">
+          <span id="durationTime">00:00</span>
+          <span class="volume-label">音量</span>
+          <input id="volumeInput" class="range-input volume-input" type="range" min="0" max="1" value="0.85" step="0.01" aria-label="音量">
+          <span class="opacity-label">评论底色</span>
+          <input id="commentOpacityInput" class="range-input opacity-input" type="range" min="0" max="100" value="72" step="1" aria-label="评论栏透明度">
+          <output id="commentOpacityValue" class="opacity-value">72%</output>
+        </div>
+
+        <div class="test-row">
+          <label class="compact-field">
+            <span>测试昵称</span>
+            <input id="mockNameInput" value="测试观众" maxlength="20">
+          </label>
+          <label class="mock-message-field">
+            <span>模拟弹幕</span>
+            <input id="mockMessageInput" placeholder="#01 8.5 或 #01评 鼓点很有张力">
+          </label>
+          <button id="sendMockButton" class="secondary-button" type="button">发送</button>
+          <label class="switch-label">
+            <input id="unparsedCommentInput" type="checkbox" checked>
+            <span></span>
+            普通弹幕作为评论
+          </label>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="dropOverlay" class="drop-overlay">
+    <div><strong>释放以加入播放队列</strong><span>可一次拖入多个音频或视频文件</span></div>
+  </div>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <span class="eyebrow">BILIBILI OPEN LIVE</span>
+          <h2>直播接入设置</h2>
+        </div>
+        <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-copy">密钥仅由 Electron 主进程读取，access_secret 将使用 Windows 系统凭据加密保存，不会传入节目画面。</p>
+      <label class="field-label">
+        <span>项目 App ID</span>
+        <input id="appIdInput" inputmode="numeric" placeholder="例如 1792612452312">
+      </label>
+      <label class="field-label">
+        <span>Access Key</span>
+        <input id="accessKeyInput" autocomplete="off" placeholder="审核通过后邮件发放">
+      </label>
+      <label class="field-label">
+        <span>Access Secret</span>
+        <input id="accessSecretInput" type="password" autocomplete="new-password" placeholder="留空表示继续使用已保存密钥">
+        <small id="secretState">尚未保存</small>
+      </label>
+      <div class="dialog-divider"></div>
+      <label class="field-label">
+        <span>主播身份码 Code</span>
+        <input id="identityCodeInput" type="password" autocomplete="off" placeholder="本次连接使用，不会写入配置">
+      </label>
+      <div class="dialog-status" id="dialogStatus">填写开发者配置后即可连接官方弹幕长链。</div>
+      <div class="dialog-actions">
+        <button id="saveConfigButton" class="ghost-button" type="button">保存配置</button>
+        <button id="disconnectButton" class="danger-button" type="button">断开连接</button>
+        <button id="connectButton" class="primary-button" type="button">连接直播间</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="trackEditDialog" class="settings-dialog track-edit-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <span class="eyebrow">TRACK METADATA</span>
+          <h2>编辑当前曲目</h2>
+        </div>
+        <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
+      </div>
+      <div class="cover-editor">
+        <div id="trackCoverPreview" class="track-cover-preview"><span>暂无封面</span></div>
+        <div class="cover-editor-actions">
+          <strong>曲目封面</strong>
+          <p>支持 JPG、PNG、WebP、GIF 和 BMP，建议使用正方形图片。</p>
+          <div>
+            <button id="chooseCoverButton" class="ghost-button" type="button">选择封面图片</button>
+            <button id="clearCoverButton" class="danger-button" type="button">移除封面</button>
+          </div>
+        </div>
+      </div>
+      <label class="field-label">
+        <span>曲目名称</span>
+        <input id="trackTitleInput" maxlength="120" placeholder="显示在节目画面中的曲名">
+      </label>
+      <label class="field-label">
+        <span>投稿人名称</span>
+        <input id="trackSubmitterInput" maxlength="80" placeholder="例如：小明 / 乐队名称 / 匿名投稿人">
+      </label>
+      <div class="dialog-actions">
+        <button class="ghost-button" value="cancel">取消</button>
+        <button id="saveTrackMetadataButton" class="primary-button" type="button">保存曲目信息</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <script src="command-parser.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

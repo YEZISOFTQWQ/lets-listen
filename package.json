@@ -1,0 +1,46 @@
+{
+  "name": "lets-listen",
+  "version": "0.1.0",
+  "description": "品味大战：面向哔哩哔哩直播的本地媒体播放、弹幕评论与多人评分工具",
+  "author": "Taste Arena",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YEZISOFTQWQ/lets-listen.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YEZISOFTQWQ/lets-listen/issues"
+  },
+  "homepage": "https://github.com/YEZISOFTQWQ/lets-listen#readme",
+  "main": "src/main.cjs",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "test": "node --test",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/lib/bili-protocol.cjs && node --check src/lib/bilibili-client.cjs && node --check src/lib/archive-store.cjs && node --check src/renderer/command-parser.js && node --check src/renderer/app.js",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "music-metadata": "^11.8.3"
+  },
+  "devDependencies": {
+    "electron": "^38.8.6",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.yezisoftqwq.letslisten",
+    "productName": "品味大战",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "portable"
+      ],
+      "artifactName": "lets-listen-${version}-${arch}.${ext}"
+    }
+  }
+}
