@@ -502,6 +502,8 @@ function addCommentToOutput(entry) {
 function renderComments() {
   const roundId = currentTrack()?.roundId;
   const visible = state.comments.filter((item) => item.roundId === roundId).slice(-40);
+  const previouslyVisible = new Set([...elements.commentStream.querySelectorAll('.comment-item')]
+    .map((item) => item.dataset.messageId));
   elements.commentStream.innerHTML = '';
   if (!visible.length) {
     const placeholder = document.createElement('div');
@@ -514,6 +516,8 @@ function renderComments() {
   for (const entry of visible) {
     const item = document.createElement('div');
     item.className = `comment-item${entry.kind === 'score' ? ' score-comment' : ''}`;
+    item.dataset.messageId = entry.msgId;
+    if (previouslyVisible.has(entry.msgId)) item.classList.add('steady-comment');
     let avatar;
     if (entry.uface) {
       avatar = document.createElement('img');
@@ -1052,6 +1056,7 @@ async function initialize() {
   }
   if (query.get('program') === '1') {
     document.body.classList.add('program-mode');
+    renderComments();
     publishBackstageState();
   }
 }

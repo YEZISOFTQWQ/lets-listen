@@ -225,8 +225,19 @@ function createWindow() {
             document.body.classList.add('program-mode');
             renderComments();
             const stream = document.getElementById('commentStream');
+            renderComments();
+            const stable = [...stream.querySelectorAll('.comment-item')]
+              .every((item) => getComputedStyle(item).animationName === 'none');
+            processDanmaku({ open_id: 'qa-comment-new', uname: '新观众',
+              msg: '#01评 新来的乐评', msg_id: 'qa-comment-new' }, 'mock');
+            const entering = getComputedStyle(stream.querySelector('[data-message-id="qa-comment-new"]'))
+              .animationName === 'comment-enter';
+            const unchanged = [...stream.querySelectorAll('.comment-item')]
+              .filter((item) => item.dataset.messageId !== 'qa-comment-new')
+              .every((item) => getComputedStyle(item).animationName === 'none');
             return { normal, fullscreen: stream.children.length,
               clientHeight: stream.clientHeight, scrollHeight: stream.scrollHeight,
+              stable, entering, unchanged,
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
               trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
               scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
@@ -234,6 +245,7 @@ function createWindow() {
               commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none' };
           })()`);
           if (result.fullscreen <= result.normal || result.fullscreen <= 4
+            || !result.stable || !result.entering || !result.unchanged
             || result.scrollHeight > result.clientHeight + 2) {
             throw new Error(`全屏乐评未扩容或溢出: ${JSON.stringify(result)}`);
           }
@@ -378,18 +390,22 @@ function createWindow() {
             return !media.paused;
           })()`);
           if (!playing) throw new Error('QA 测试音无法播放');
-          await new Promise((resolve) => setTimeout(resolve, 250));
-          const visualizer = await mainWindow.webContents.executeJavaScript(`(() => {
-            const levels = new Uint8Array(state.analyser.frequencyBinCount);
-            state.analyser.getByteFrequencyData(levels);
-            const canvas = document.getElementById('visualizer');
-            const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-            let drawn = false;
-            for (let index = 3; index < pixels.length; index += 4) {
-              if (pixels[index] > 0) { drawn = true; break; }
-            }
-            return { level: Math.max(...levels), width: canvas.width, height: canvas.height, drawn };
-          })()`);
+          let visualizer;
+          for (let retry = 0; retry < 20; retry += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            visualizer = await mainWindow.webContents.executeJavaScript(`(() => {
+              const levels = new Uint8Array(state.analyser.frequencyBinCount);
+              state.analyser.getByteFrequencyData(levels);
+              const canvas = document.getElementById('visualizer');
+              const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+              let drawn = false;
+              for (let index = 3; index < pixels.length; index += 4) {
+                if (pixels[index] > 0) { drawn = true; break; }
+              }
+              return { level: Math.max(...levels), width: canvas.width, height: canvas.height, drawn };
+            })()`);
+            if (visualizer.level > 0 && visualizer.drawn) break;
+          }
           if (visualizer.level <= 0 || visualizer.width <= 1 || visualizer.height <= 1 || !visualizer.drawn) {
             throw new Error(`音频可视化没有绘制有效频谱：${JSON.stringify(visualizer)}`);
           }
@@ -470,7 +486,6 @@ function createWindow() {
           await backstageWindow.webContents.executeJavaScript(`(async () => {
             await window.backstageApi.command('volume', { value: 0.35 });
             await window.backstageApi.command('comment-opacity', { value: 47 });
-            await window.backstageApi.command('seek', { progress: 500 });
             await window.backstageApi.command('unparsed-as-comment', { value: false });
             await window.backstageApi.command('mock-danmaku', { name: '后台观众', message: '#01 8.3' });
             await window.backstageApi.command('import', { items: [{
@@ -481,16 +496,30 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const controls = await mainWindow.webContents.executeJavaScript(`({
             volume: document.getElementById('mediaElement').volume,
-            seekTime: document.getElementById('mediaElement').currentTime,
             opacity: Number(document.getElementById('commentOpacityInput').value),
             unparsed: document.getElementById('unparsedCommentInput').checked,
             playlistCount: document.querySelectorAll('.playlist-item').length,
             comments: document.getElementById('commentStream').textContent
           })`);
           if (Math.abs(controls.volume - 0.35) > 0.01
-            || controls.seekTime < 0.4 || controls.seekTime > 0.6 || controls.opacity !== 47
+            || controls.opacity !== 47
             || controls.unparsed || controls.playlistCount !== 2 || !controls.comments.includes('8.3')) {
             throw new Error(`后台控制未同步到节目: ${JSON.stringify(controls)}`);
+          }
+          await mainWindow.webContents.executeJavaScript(
+            `document.getElementById('mediaElement').pause()`,
+          );
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('seek', { progress: 500 })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const seek = await mainWindow.webContents.executeJavaScript(`({
+            time: document.getElementById('mediaElement').currentTime,
+            duration: document.getElementById('mediaElement').duration,
+            paused: document.getElementById('mediaElement').paused,
+          })`);
+          if (!seek.paused || Math.abs(seek.time - seek.duration / 2) > 0.1) {
+            throw new Error(`后台进度调整没有定位到一半：${JSON.stringify(seek)}`);
           }
           await mainWindow.webContents.executeJavaScript(
             `document.getElementById('mediaElement').loop = true`,
@@ -763,7 +792,7 @@ function createWindow() {
           console.log('[qa] backstage controls and description passed');
           app.quit();
         } catch (error) {
-          console.error(`[qa] backstage description failed: ${error.message}`);
+          console.error(`[qa] backstage description failed: ${error.stack || error.message}`);
           app.exit(1);
         }
       }, qaDemo ? 1800 : 1200);
