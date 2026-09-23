@@ -11,6 +11,8 @@ const ids = [
   'mockMessageInput', 'sendMockButton', 'unparsedInput', 'connectionStatus',
   'appIdInput', 'accessKeyInput', 'accessSecretInput', 'secretState',
   'identityCodeInput', 'saveConfigButton', 'connectButton', 'disconnectButton', 'status',
+  'streamStatus', 'ffmpegPathInput', 'ffmpegStatus', 'streamQualityInput',
+  'streamServerInput', 'streamKeyInput', 'streamTestButton', 'streamStartButton', 'streamStopButton',
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 let snapshot = { currentTrackId: '', tracks: [], playback: {}, connection: {}, sessionId: '' };
@@ -246,6 +248,35 @@ async function connectLive() {
   }
 }
 
+function renderStreamState(state) {
+  elements.streamStatus.textContent = state.message || '未推流';
+  elements.streamStatus.classList.toggle('error', state.status === 'error');
+  const busy = ['starting', 'live', 'stopping'].includes(state.status);
+  elements.streamTestButton.disabled = busy;
+  elements.streamStartButton.disabled = busy;
+  elements.streamStopButton.disabled = !['starting', 'live'].includes(state.status);
+}
+
+async function probeStream() {
+  try {
+    const result = await api.probeStream(elements.ffmpegPathInput.value.trim());
+    elements.ffmpegStatus.textContent = `FFmpeg 已就绪：${result.executable}`;
+  } catch (error) {
+    elements.ffmpegStatus.textContent = error.message;
+  }
+}
+
+function streamOptions(mode, filePath = '') {
+  return {
+    mode,
+    filePath,
+    ffmpegPath: elements.ffmpegPathInput.value.trim(),
+    quality: elements.streamQualityInput.value,
+    server: elements.streamServerInput.value.trim(),
+    key: elements.streamKeyInput.value.trim(),
+  };
+}
+
 elements.importButton.addEventListener('click', () => importMedia(api.selectMedia()));
 elements.exportButton.addEventListener('click', async () => {
   if (!snapshot.sessionId) return;
@@ -328,6 +359,34 @@ elements.disconnectButton.addEventListener('click', async () => {
     setStatus(error.message, true);
   }
 });
+elements.ffmpegPathInput.value = localStorage.getItem('ffmpegPath') || '';
+elements.ffmpegPathInput.addEventListener('change', () => {
+  localStorage.setItem('ffmpegPath', elements.ffmpegPathInput.value.trim());
+  probeStream();
+});
+elements.streamTestButton.addEventListener('click', async () => {
+  try {
+    const filePath = await api.selectStreamTestFile();
+    if (filePath) await api.startStream(streamOptions('test', filePath));
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+elements.streamStartButton.addEventListener('click', async () => {
+  try {
+    await api.startStream(streamOptions('live'));
+    elements.streamKeyInput.value = '';
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+elements.streamStopButton.addEventListener('click', async () => {
+  try {
+    await api.stopStream();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 window.addEventListener('dragenter', (event) => {
   event.preventDefault();
   dragDepth += 1;
@@ -349,5 +408,8 @@ window.addEventListener('drop', (event) => {
 
 api.onState(render);
 api.onFeedback((feedback) => setStatus(feedback.message, feedback.type === 'error'));
+api.onStreamState(renderStreamState);
 api.getState().then(render).catch((error) => setStatus(error.message, true));
+api.getStreamState().then(renderStreamState).catch((error) => setStatus(error.message, true));
+probeStream();
 loadConfig();

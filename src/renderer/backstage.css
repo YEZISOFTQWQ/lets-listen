@@ -59,3 +59,6 @@ details[open] summary { margin-bottom: 15px; }
 #status { position: sticky; bottom: 0; min-height: 30px; margin: 0; padding: 8px 0; background: #0c0e13; color: #a1a4b0; font-size: 11px; }
 #status.error { color: #ff8e7c; }
 body.dragging::after { position: fixed; inset: 10px; display: grid; place-items: center; border: 2px dashed #d8ff3e; border-radius: 14px; background: rgba(8,9,13,.94); color: #d8ff3e; content: "释放以导入音频或视频"; font-size: 22px; font-weight: 800; pointer-events: none; }
+.stream-hint { color: #aeb2bd; font-size: 12px; line-height: 1.6; }
+.stream-actions { margin-top: 14px; }
+#streamStatus { max-width: 60%; text-align: right; overflow-wrap: anywhere; }

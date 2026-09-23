@@ -20,6 +20,20 @@ contextBridge.exposeInMainWorld('tasteArena', {
     return () => ipcRenderer.removeListener('backstage:command', listener);
   },
   sendBackstageFeedback: (message, type) => ipcRenderer.invoke('backstage:feedback', { message, type }),
+  onStreamStartCapture: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('stream:start-capture', listener);
+    return () => ipcRenderer.removeListener('stream:start-capture', listener);
+  },
+  onStreamStopCapture: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('stream:stop-capture', listener);
+    return () => ipcRenderer.removeListener('stream:stop-capture', listener);
+  },
+  sendStreamChunk: (id, bytes) => ipcRenderer.send('stream:chunk', id, bytes),
+  sendStreamCaptureReady: (id) => ipcRenderer.send('stream:capture-ready', id),
+  sendStreamCaptureError: (id, message) => ipcRenderer.send('stream:capture-error', id, message),
+  sendStreamCaptureStopped: (id) => ipcRenderer.send('stream:capture-stopped', id),
   pathForFile: (file) => webUtils.getPathForFile(file),
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),

@@ -98,6 +98,35 @@
         <span>普通弹幕作为评论</span>
       </label>
     </section>
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>内置推流</h2>
+        <span id="streamStatus" class="hint">未推流</span>
+      </div>
+      <p class="stream-hint">直接采集主节目窗口和本软件播放的音频；后台窗口不会进入画面。先在主窗口进入节目模式，再开始推流。没有串流密钥也可以录制 10 秒测试录像。</p>
+      <label class="field">
+        <span>FFmpeg 路径（已加入 PATH 时可留空）</span>
+        <input id="ffmpegPathInput" placeholder="自动查找 FFmpeg；也可填写 ffmpeg.exe 的完整路径">
+      </label>
+      <div id="ffmpegStatus" class="hint">正在检测 FFmpeg…</div>
+      <label class="field">
+        <span>输出画质</span>
+        <select id="streamQualityInput"><option value="720p">720p · 30 帧</option><option value="1080p">1080p · 30 帧</option></select>
+      </label>
+      <label class="field">
+        <span>B站推流服务器地址</span>
+        <input id="streamServerInput" placeholder="rtmp://…" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>串流密钥（仅本次使用，不保存）</span>
+        <input id="streamKeyInput" type="password" placeholder="拿到密钥后再填写" autocomplete="off">
+      </label>
+      <div class="button-group stream-actions">
+        <button id="streamTestButton" type="button">录制 10 秒测试</button>
+        <button id="streamStartButton" class="primary" type="button">开始推流</button>
+        <button id="streamStopButton" type="button" disabled>停止</button>
+      </div>
+    </section>
     <details class="panel">
       <summary>B站直播连接</summary>
       <div id="connectionStatus" class="hint">模拟弹幕模式</div>

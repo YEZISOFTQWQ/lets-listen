@@ -19,6 +19,10 @@ const state = {
   audioContext: null,
   analyser: null,
   mediaSource: null,
+  captureDestination: null,
+  streamCapture: null,
+  pendingStreamId: null,
+  cancelledStreamCaptures: new Set(),
   dragDepth: 0,
   pendingCoverDataUrl: '',
   pendingCoverPath: '',
@@ -248,6 +252,8 @@ async function ensureAudioGraph() {
     state.mediaSource = state.audioContext.createMediaElementSource(elements.mediaElement);
     state.mediaSource.connect(state.analyser);
     state.analyser.connect(state.audioContext.destination);
+    state.captureDestination = state.audioContext.createMediaStreamDestination();
+    state.mediaSource.connect(state.captureDestination);
   }
   if (state.audioContext.state === 'suspended') await state.audioContext.resume();
 }
@@ -264,6 +270,74 @@ async function togglePlayback() {
   } catch (error) {
     showToast(`播放失败：${error.message}`, 'error');
   }
+}
+
+async function startStreamCapture({ id, mediaSourceId, testSeconds = 0 }) {
+  if (state.streamCapture || state.pendingStreamId) throw new Error('已有画面采集正在运行');
+  state.pendingStreamId = id;
+  let displayStream;
+  try {
+    await ensureAudioGraph();
+    try {
+      if (!mediaSourceId) throw new Error('节目窗口缺少捕获标识');
+      displayStream = await navigator.mediaDevices.getUserMedia({
+        video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: mediaSourceId, maxFrameRate: 30 } },
+        audio: false,
+      });
+    } catch (error) {
+      // Chromium versions differ in support for exact-window getUserMedia constraints.
+      displayStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+    }
+    const videoTrack = displayStream.getVideoTracks()[0];
+    if (state.cancelledStreamCaptures.delete(id)) throw new Error('采集已取消');
+    const audioTrack = state.captureDestination.stream.getAudioTracks()[0];
+    if (!videoTrack || !audioTrack) throw new Error('无法取得节目画面或应用音频');
+    const combined = new MediaStream([videoTrack, audioTrack]);
+    const mimeType = ['video/webm;codecs=vp8,opus', 'video/webm'].find((type) => MediaRecorder.isTypeSupported(type));
+    if (!mimeType) throw new Error('当前 Chromium 不支持 WebM 实时编码');
+    const recorder = new MediaRecorder(combined, {
+      mimeType, videoBitsPerSecond: 4500000, audioBitsPerSecond: 160000,
+    });
+    const capture = { id, recorder, displayStream, pending: Promise.resolve(), timer: null };
+    state.streamCapture = capture;
+    state.pendingStreamId = null;
+    recorder.addEventListener('dataavailable', (event) => {
+      if (!event.data.size) return;
+      capture.pending = capture.pending.then(async () => {
+        api.sendStreamChunk(id, new Uint8Array(await event.data.arrayBuffer()));
+      });
+    });
+    recorder.addEventListener('error', (event) => api.sendStreamCaptureError(id, event.error?.message || '录制器发生错误'));
+    recorder.addEventListener('stop', async () => {
+      clearTimeout(capture.timer);
+      displayStream.getTracks().forEach((track) => track.stop());
+      try {
+        await capture.pending;
+        api.sendStreamCaptureStopped(id);
+      } catch (error) {
+        api.sendStreamCaptureError(id, error.message);
+      }
+      if (state.streamCapture === capture) state.streamCapture = null;
+    });
+    videoTrack.addEventListener('ended', () => stopStreamCapture(id));
+    recorder.start(500);
+    api.sendStreamCaptureReady(id);
+    if (testSeconds) capture.timer = setTimeout(() => stopStreamCapture(id), testSeconds * 1000);
+  } catch (error) {
+    state.pendingStreamId = null;
+    state.cancelledStreamCaptures.delete(id);
+    displayStream?.getTracks().forEach((track) => track.stop());
+    api.sendStreamCaptureError(id, error.message);
+  }
+}
+
+function stopStreamCapture(id) {
+  const capture = state.streamCapture;
+  if (!capture || capture.id !== id) {
+    if (state.pendingStreamId === id) state.cancelledStreamCaptures.add(id);
+    return;
+  }
+  if (capture.recorder.state !== 'inactive') capture.recorder.stop();
 }
 
 function goRelative(offset) {
@@ -399,8 +473,7 @@ function addCommentToOutput(entry) {
 
 function renderComments() {
   const roundId = currentTrack()?.roundId;
-  const limit = elements.programFrame.classList.contains('video-mode') ? 6 : 4;
-  const visible = state.comments.filter((item) => item.roundId === roundId).slice(-limit);
+  const visible = state.comments.filter((item) => item.roundId === roundId).slice(-40);
   elements.commentStream.innerHTML = '';
   if (!visible.length) {
     const placeholder = document.createElement('div');
@@ -434,6 +507,11 @@ function renderComments() {
     copy.append(name, content);
     item.append(avatar, copy);
     elements.commentStream.appendChild(item);
+  }
+  // Keep every row that fits; fullscreen can show more without clipping long comments.
+  while (elements.commentStream.scrollHeight > elements.commentStream.clientHeight
+    && elements.commentStream.children.length > 1) {
+    elements.commentStream.firstElementChild.remove();
   }
 }
 
@@ -624,6 +702,7 @@ async function exportArchive() {
 
 async function enterProgramMode() {
   document.body.classList.add('program-mode');
+  renderComments();
   publishBackstageState();
   try {
     await document.documentElement.requestFullscreen();
@@ -635,6 +714,7 @@ async function enterProgramMode() {
 
 function leaveProgramMode() {
   document.body.classList.remove('program-mode');
+  renderComments();
   publishBackstageState();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
@@ -876,14 +956,20 @@ function bindEvents() {
   });
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) document.body.classList.remove('program-mode');
+    renderComments();
     publishBackstageState();
   });
+  window.addEventListener('resize', renderComments);
 
   api.onLiveState((payload) => setConnectionState(payload.status, payload.message));
   api.onBackstageUpdate(applyBackstageUpdate);
   api.onBackstageCommand((command) => {
     handleBackstageCommand(command).catch((error) => showToast(error.message, 'error', 6000));
   });
+  api.onStreamStartCapture((payload) => {
+    startStreamCapture(payload).catch((error) => api.sendStreamCaptureError(payload.id, error.message));
+  });
+  api.onStreamStopCapture((payload) => stopStreamCapture(payload.id));
   api.onDiagnostic((payload) => showToast(payload.message, payload.level === 'error' ? 'error' : 'info', 6000));
   api.onLiveMessage((payload) => {
     if (payload.cmd === 'LIVE_OPEN_PLATFORM_DM' && payload.data) processDanmaku(payload.data, 'live');

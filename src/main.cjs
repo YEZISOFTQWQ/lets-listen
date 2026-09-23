@@ -1,11 +1,13 @@
 'use strict';
 
-const { app, BrowserWindow, dialog, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { randomUUID } = require('node:crypto');
 const { BilibiliLiveClient } = require('./lib/bilibili-client.cjs');
 const { ArchiveStore } = require('./lib/archive-store.cjs');
+const { StreamController, findFfmpeg } = require('./lib/stream-controller.cjs');
 
 let mainWindow;
 let backstageWindow;
@@ -18,6 +20,10 @@ let backstageState = {
 };
 let liveClient;
 let archiveStore;
+const streamController = new StreamController();
+let activeCaptureId = '';
+let captureStartTimer;
+let captureStopTimer;
 
 function sendToRenderer(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -153,6 +159,34 @@ function dialogOwner(event) {
   return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
 
+function setupDisplayCapture() {
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    if (request.frame !== mainWindow?.webContents.mainFrame || !activeCaptureId) return;
+    const sourceId = mainWindow.getMediaSourceId();
+    const sources = await desktopCapturer.getSources({ types: ['window'] });
+    const source = sources.find((item) => item.id === sourceId);
+    if (!source) {
+      streamController.abort('无法捕获节目窗口，请确认节目窗口处于可见状态');
+      return;
+    }
+    callback({ video: source });
+  });
+}
+
+function requestCaptureStop() {
+  if (!activeCaptureId) {
+    streamController.finish();
+    return;
+  }
+  if (captureStopTimer) return;
+  const stoppingId = activeCaptureId;
+  sendToRenderer('stream:stop-capture', { id: stoppingId });
+  captureStopTimer = setTimeout(() => {
+    captureStopTimer = null;
+    if (activeCaptureId === stoppingId) streamController.abort('停止采集超时，编码进程已终止');
+  }, 6000);
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1500,
@@ -178,6 +212,7 @@ function createWindow() {
     }
   });
   mainWindow.on('closed', () => {
+    if (activeCaptureId) streamController.abort('节目窗口已关闭，推流结束');
     mainWindow = null;
     if (backstageWindow && !backstageWindow.isDestroyed()) backstageWindow.close();
   });
@@ -187,6 +222,8 @@ function createWindow() {
   const qaVideo = process.argv.includes('--qa-video');
   const qaExit = process.argv.includes('--qa-exit');
   const qaDescription = process.argv.includes('--qa-description');
+  const qaStream = process.argv.includes('--qa-stream');
+  const qaComments = process.argv.includes('--qa-comments');
   mainWindow.loadFile(
     path.join(__dirname, 'renderer', 'index.html'),
     qaDemo || qaProgram || qaVideo ? { query: { qa: qaDemo ? '1' : '0', program: qaProgram ? '1' : '0', video: qaVideo ? '1' : '0' } } : undefined,
@@ -207,6 +244,68 @@ function createWindow() {
           app.quit();
         } catch (error) {
           console.error(`[qa] screenshot failed: ${error.message}`);
+          app.exit(1);
+        }
+      }, qaDemo ? 1800 : 1200);
+    });
+  } else if (qaComments) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        try {
+          const result = await mainWindow.webContents.executeJavaScript(`(() => {
+            for (let index = 0; index < 24; index += 1) {
+              processDanmaku({ open_id: 'qa-comment-' + index, uname: '观众' + index,
+                msg: '#01评 第' + index + '条乐评，旋律和节奏都很有趣', msg_id: 'qa-comment-msg-' + index }, 'mock');
+            }
+            const normal = document.getElementById('commentStream').children.length;
+            document.body.classList.add('program-mode');
+            renderComments();
+            const stream = document.getElementById('commentStream');
+            return { normal, fullscreen: stream.children.length,
+              clientHeight: stream.clientHeight, scrollHeight: stream.scrollHeight };
+          })()`);
+          if (result.fullscreen <= result.normal || result.fullscreen <= 4
+            || result.scrollHeight > result.clientHeight + 2) {
+            throw new Error(`全屏乐评未扩容或溢出: ${JSON.stringify(result)}`);
+          }
+          console.log(`[qa] fullscreen comments passed (${result.normal} -> ${result.fullscreen})`);
+          app.quit();
+        } catch (error) {
+          console.error(`[qa] fullscreen comments failed: ${error.message}`);
+          app.exit(1);
+        }
+      }, qaDemo ? 1800 : 1200);
+    });
+  } else if (qaStream) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        const outputPath = path.join(app.getPath('temp'), `lets-listen-stream-qa-${randomUUID()}.mp4`);
+        try {
+          mainWindow.setFullScreen(true);
+          openBackstageWindow();
+          await new Promise((resolve) => backstageWindow.webContents.once('did-finish-load', resolve));
+          const completed = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('测试录制超时')), 25000);
+            const listener = (state) => {
+              if (!['idle', 'error'].includes(state.status)) return;
+              clearTimeout(timeout);
+              streamController.off('state', listener);
+              if (state.status === 'error') reject(new Error(state.message));
+              else resolve();
+            };
+            streamController.on('state', listener);
+          });
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.startStream(${JSON.stringify({ mode: 'test', filePath: outputPath, quality: '720p' })})`,
+          );
+          await completed;
+          const result = await fs.stat(outputPath);
+          if (result.size < 10000) throw new Error(`录像过小：${result.size} 字节`);
+          console.log(`[qa] stream container encoded (${result.size} bytes; inspect visible picture/audio on the target desktop): ${outputPath}`);
+          if (!process.argv.includes('--qa-keep-stream')) await fs.unlink(outputPath);
+          app.quit();
+        } catch (error) {
+          console.error(`[qa] stream recording failed: ${error.message}`);
           app.exit(1);
         }
       }, qaDemo ? 1800 : 1200);
@@ -353,6 +452,9 @@ function registerIpc() {
     if (backstageWindow && !backstageWindow.isDestroyed()) {
       backstageWindow.webContents.send('backstage:state', backstageState);
     }
+    if (activeCaptureId && !backstageState.playback.programMode) {
+      requestCaptureStop();
+    }
     return { ok: true };
   });
   ipcMain.handle('backstage:update-track', (event, update) => {
@@ -470,10 +572,86 @@ function registerIpc() {
     if (result.canceled || !result.filePath) return null;
     return archiveStore.exportCsv(sessionId, result.filePath);
   });
+
+  streamController.on('state', (state) => {
+    if (backstageWindow && !backstageWindow.isDestroyed()) {
+      backstageWindow.webContents.send('stream:state', state);
+    }
+    if (['idle', 'error'].includes(state.status) && activeCaptureId) {
+      clearTimeout(captureStartTimer);
+      clearTimeout(captureStopTimer);
+      captureStopTimer = null;
+      sendToRenderer('stream:stop-capture', { id: activeCaptureId });
+      activeCaptureId = '';
+    }
+  });
+  ipcMain.handle('stream:state', (event) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权查看推流状态');
+    return streamController.status;
+  });
+  ipcMain.handle('stream:probe', async (event, ffmpegPath) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权检查推流环境');
+    const executable = await findFfmpeg(String(ffmpegPath || ''));
+    return { executable };
+  });
+  ipcMain.handle('stream:select-test-file', async (event) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权选择测试文件');
+    const result = await dialog.showSaveDialog(dialogOwner(event), {
+      title: '保存内置推流测试录像',
+      defaultPath: `lets-listen-test-${new Date().toISOString().slice(0, 10)}.mp4`,
+      filters: [{ name: 'MP4 视频', extensions: ['mp4'] }],
+    });
+    return result.canceled ? '' : result.filePath;
+  });
+  ipcMain.handle('stream:start', async (event, options) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权开始推流');
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('节目窗口已关闭');
+    if (!backstageState.playback.programMode) throw new Error('请先在主窗口进入节目模式');
+    if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+    await streamController.start(options || {});
+    activeCaptureId = randomUUID();
+    sendToRenderer('stream:start-capture', {
+      id: activeCaptureId,
+      mediaSourceId: mainWindow.getMediaSourceId(),
+      testSeconds: options?.mode === 'test' ? 10 : 0,
+    });
+    captureStartTimer = setTimeout(() => {
+      if (streamController.status.status === 'starting') {
+        streamController.abort('启动采集超时，请确认节目窗口可见且允许窗口捕获');
+      }
+    }, 12000);
+    return { ok: true };
+  });
+  ipcMain.handle('stream:stop', (event) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权停止推流');
+    requestCaptureStop();
+    return { ok: true };
+  });
+  ipcMain.on('stream:chunk', (event, id, bytes) => {
+    if (event.sender !== mainWindow?.webContents || id !== activeCaptureId) return;
+    streamController.writeChunk(bytes);
+  });
+  ipcMain.on('stream:capture-ready', (event, id) => {
+    if (event.sender !== mainWindow?.webContents || id !== activeCaptureId) return;
+    clearTimeout(captureStartTimer);
+    streamController.update('live', streamController.mode === 'test'
+      ? '正在录制 10 秒测试录像…' : '正在编码并推送节目画面与应用音频');
+  });
+  ipcMain.on('stream:capture-error', (event, id, message) => {
+    if (event.sender !== mainWindow?.webContents || id !== activeCaptureId) return;
+    streamController.abort(`采集失败：${String(message || '未知错误').slice(0, 300)}`);
+  });
+  ipcMain.on('stream:capture-stopped', (event, id) => {
+    if (event.sender !== mainWindow?.webContents || id !== activeCaptureId) return;
+    clearTimeout(captureStopTimer);
+    captureStopTimer = null;
+    streamController.finish();
+  });
 }
 
 app.whenReady().then(() => {
   archiveStore = new ArchiveStore(path.join(app.getPath('documents'), '品味大战存档'));
+  setupDisplayCapture();
   registerIpc();
   createWindow();
   app.on('activate', () => {
@@ -482,6 +660,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', (event) => {
+  if (activeCaptureId) streamController.abort('软件退出，推流结束');
   if (!liveClient || liveClient.closedByUser) return;
   event.preventDefault();
   liveClient.stop().catch(() => {}).finally(() => {

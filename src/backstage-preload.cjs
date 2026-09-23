@@ -15,6 +15,16 @@ contextBridge.exposeInMainWorld('backstageApi', {
   connectLive: (identityCode) => ipcRenderer.invoke('live:connect', identityCode),
   disconnectLive: () => ipcRenderer.invoke('live:disconnect'),
   exportArchiveCsv: (sessionId) => ipcRenderer.invoke('archive:export-csv', sessionId),
+  getStreamState: () => ipcRenderer.invoke('stream:state'),
+  probeStream: (ffmpegPath) => ipcRenderer.invoke('stream:probe', ffmpegPath),
+  selectStreamTestFile: () => ipcRenderer.invoke('stream:select-test-file'),
+  startStream: (options) => ipcRenderer.invoke('stream:start', options),
+  stopStream: () => ipcRenderer.invoke('stream:stop'),
+  onStreamState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('stream:state', listener);
+    return () => ipcRenderer.removeListener('stream:state', listener);
+  },
   onState: (callback) => {
     const listener = (_event, snapshot) => callback(snapshot);
     ipcRenderer.on('backstage:state', listener);

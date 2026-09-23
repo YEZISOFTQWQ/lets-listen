@@ -230,6 +230,12 @@ body.program-mode .app-shell { display: block; }
 body.program-mode .workspace { height: 100vh; padding: 0; overflow: hidden; background: #000; }
 body.program-mode .program-frame { width: 100vw; height: 100vh; min-width: 0; aspect-ratio: auto; margin: 0; border: 0; border-radius: 0; }
 body.program-mode .program-content { padding: 5.5% 5% 10%; }
+body.program-mode .interaction-zone { gap: 2%; }
+body.program-mode .score-card { padding: 3% 5%; }
+body.program-mode .score-main strong { font-size: clamp(40px, 4vw, 64px); }
+body.program-mode .score-meter { margin-top: 3%; }
+body.program-mode .comments-card { padding: 3% 4%; }
+body.program-mode .comment-item { padding: 1.4% 0; }
 body.program-mode .program-frame.video-mode .program-content { padding: 4.5%; }
 body.program-mode .program-frame.video-mode .interaction-zone { width: min(32vw, 520px); height: 52vh; }
 body.program-mode .toast-container { display: none; }
