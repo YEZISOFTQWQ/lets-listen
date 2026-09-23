@@ -88,7 +88,7 @@ function showToast(message, type = 'info', duration = 3600) {
 
 async function ensureArchive() {
   if (!state.sessionPromise) {
-    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 1 });
+    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 2 });
   }
   const session = await state.sessionPromise;
   state.sessionId = session.sessionId;
@@ -99,7 +99,12 @@ async function ensureArchive() {
 async function archive(entry) {
   try {
     const session = await ensureArchive();
-    await api.appendArchive(session.sessionId, entry);
+    const record = { ...entry };
+    if (Object.hasOwn(record, 'roundId')) {
+      record.trackId = record.roundId;
+      delete record.roundId;
+    }
+    await api.appendArchive(session.sessionId, record);
   } catch (error) {
     console.error('archive failed', error);
   }

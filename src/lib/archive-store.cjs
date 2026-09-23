@@ -63,11 +63,11 @@ class ArchiveStore {
       .filter(Boolean)
       .map((line) => JSON.parse(line))
       .filter((record) => ['comment', 'score'].includes(record.type));
-    const header = ['type', 'at', 'round_id', 'track_title', 'open_id', 'uname', 'score', 'comment', 'msg_id'];
+    const header = ['type', 'at', 'track_id', 'track_title', 'open_id', 'uname', 'score', 'comment', 'msg_id'];
     const rows = records.map((record) => [
       record.type,
       record.at,
-      record.roundId,
+      record.trackId ?? record.roundId,
       record.trackTitle,
       record.openId,
       record.uname,
@@ -82,4 +82,3 @@ class ArchiveStore {
 }
 
 module.exports = { ArchiveStore, csvCell };
-
