@@ -123,7 +123,6 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .program-frame.has-description .now-playing { margin-top: clamp(12px, 1.5vw, 22px); }
 .track-description-card[hidden] { display: none; }
 .track-description-card { width: 86%; max-height: 28%; margin-top: clamp(10px, 1.5vw, 22px); padding: clamp(10px, 1.2vw, 18px); overflow: hidden; border: 1px solid rgba(216,255,62,.2); border-radius: 12px; background: rgba(13,15,20,.74); backdrop-filter: blur(12px); }
-.track-description-card strong { display: block; margin-bottom: 6px; color: var(--acid); font-size: clamp(9px, .85vw, 13px); }
 .track-description-card p { display: -webkit-box; margin: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 5; white-space: pre-line; overflow-wrap: anywhere; color: #e6e4dd; font-size: clamp(9px, .85vw, 13px); line-height: 1.45; }
 #visualizer { position: absolute; left: 48%; right: 2%; top: 16%; width: 48%; height: 36%; opacity: .8; mix-blend-mode: screen; }
 

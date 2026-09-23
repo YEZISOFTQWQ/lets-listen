@@ -9,7 +9,13 @@ const { ArchiveStore } = require('./lib/archive-store.cjs');
 
 let mainWindow;
 let backstageWindow;
-let backstageState = { currentTrackId: '', tracks: [] };
+let backstageState = {
+  currentTrackId: '',
+  tracks: [],
+  playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, commentOpacity: 72, programMode: false, unparsedAsComment: true },
+  connection: { status: 'disconnected', message: '模拟弹幕模式' },
+  sessionId: '',
+};
 let liveClient;
 let archiveStore;
 
@@ -121,11 +127,11 @@ function openBackstageWindow() {
     return;
   }
   backstageWindow = new BrowserWindow({
-    width: 460,
-    height: 550,
-    minWidth: 380,
-    minHeight: 440,
-    title: 'lets-listen · 简介后台',
+    width: 640,
+    height: 860,
+    minWidth: 480,
+    minHeight: 600,
+    title: 'lets-listen · 直播后台',
     backgroundColor: '#0c0e13',
     autoHideMenuBar: true,
     alwaysOnTop: true,
@@ -141,6 +147,10 @@ function openBackstageWindow() {
     backstageWindow?.webContents.send('backstage:state', backstageState);
   });
   backstageWindow.loadFile(path.join(__dirname, 'renderer', 'backstage.html'));
+}
+
+function dialogOwner(event) {
+  return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
 
 function createWindow() {
@@ -217,9 +227,11 @@ function createWindow() {
           const shown = await mainWindow.webContents.executeJavaScript(`({
             label: document.querySelector('.track-pill')?.textContent.trim(),
             text: document.getElementById('trackDescriptionText')?.textContent,
+            cardText: document.getElementById('trackDescriptionCard')?.textContent.trim(),
             hidden: document.getElementById('trackDescriptionCard')?.hidden
           })`);
-          if (!shown.label?.startsWith('TRACK') || shown.text !== '后台实时修改的歌曲简介' || shown.hidden) {
+          if (!shown.label?.startsWith('TRACK') || shown.text !== '后台实时修改的歌曲简介'
+            || shown.cardText !== shown.text || shown.hidden) {
             throw new Error(`简介未同步到节目画面: ${JSON.stringify(shown)}`);
           }
           if (!qaProgram) {
@@ -245,7 +257,34 @@ function createWindow() {
             `document.getElementById('trackDescriptionCard').hidden`,
           );
           if (!hidden) throw new Error('后台关闭简介后节目画面仍在展示');
-          console.log('[qa] backstage description edit and visibility passed');
+          await backstageWindow.webContents.executeJavaScript(`(async () => {
+            await window.backstageApi.command('volume', { value: 0.35 });
+            await window.backstageApi.command('comment-opacity', { value: 47 });
+            await window.backstageApi.command('seek', { progress: 500 });
+            await window.backstageApi.command('unparsed-as-comment', { value: false });
+            await window.backstageApi.command('mock-danmaku', { name: '后台观众', message: '#01 8.3' });
+            await window.backstageApi.command('import', { items: [{
+              id: 'qa-imported-track', path: 'qa-imported.wav', url: 'file:///qa-imported.wav',
+              type: 'audio', title: '后台导入曲目', artist: '', duration: 0, coverDataUrl: ''
+            }] });
+          })()`);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          const controls = await mainWindow.webContents.executeJavaScript(`({
+            volume: document.getElementById('mediaElement').volume,
+            opacity: Number(document.getElementById('commentOpacityInput').value),
+            unparsed: document.getElementById('unparsedCommentInput').checked,
+            playlistCount: document.querySelectorAll('.playlist-item').length,
+            comments: document.getElementById('commentStream').textContent
+          })`);
+          if (Math.abs(controls.volume - 0.35) > 0.01 || controls.opacity !== 47
+            || controls.unparsed || controls.playlistCount !== 2 || !controls.comments.includes('8.3')) {
+            throw new Error(`后台控制未同步到节目: ${JSON.stringify(controls)}`);
+          }
+          const backstageCount = await backstageWindow.webContents.executeJavaScript(
+            `document.querySelectorAll('.playlist-item').length`,
+          );
+          if (backstageCount !== 2) throw new Error('后台播放队列没有同步新增曲目');
+          console.log('[qa] backstage controls and description passed');
           app.quit();
         } catch (error) {
           console.error(`[qa] backstage description failed: ${error.message}`);
@@ -288,10 +327,28 @@ function registerIpc() {
         id: String(track.id || ''),
         number: String(track.number || ''),
         title: String(track.title || ''),
+        submitter: String(track.submitter || ''),
+        hasCover: Boolean(track.hasCover),
+        coverPath: String(track.coverPath || ''),
+        duration: Number(track.duration || 0),
         type: track.type === 'video' ? 'video' : 'audio',
         description: String(track.description || '').slice(0, 500),
         descriptionVisible: Boolean(track.descriptionVisible),
       })),
+      playback: {
+        currentTime: Number(snapshot?.playback?.currentTime || 0),
+        duration: Number(snapshot?.playback?.duration || 0),
+        paused: Boolean(snapshot?.playback?.paused),
+        volume: Number(snapshot?.playback?.volume ?? 0.85),
+        commentOpacity: Number(snapshot?.playback?.commentOpacity ?? 72),
+        programMode: Boolean(snapshot?.playback?.programMode),
+        unparsedAsComment: Boolean(snapshot?.playback?.unparsedAsComment),
+      },
+      connection: {
+        status: String(snapshot?.connection?.status || 'disconnected'),
+        message: String(snapshot?.connection?.message || ''),
+      },
+      sessionId: String(snapshot?.sessionId || ''),
     };
     if (backstageWindow && !backstageWindow.isDestroyed()) {
       backstageWindow.webContents.send('backstage:state', backstageState);
@@ -303,15 +360,49 @@ function registerIpc() {
     const id = String(update?.id || '');
     if (!backstageState.tracks.some((track) => track.id === id)) throw new Error('曲目已不存在');
     const patch = { id };
+    if (typeof update.title === 'string') {
+      const title = update.title.trim().slice(0, 120);
+      if (!title) throw new Error('曲目名称不能为空');
+      patch.title = title;
+    }
+    if (typeof update.submitter === 'string') patch.submitter = update.submitter.trim().slice(0, 80);
     if (typeof update.description === 'string') patch.description = update.description.trim().slice(0, 500);
     if (typeof update.descriptionVisible === 'boolean') patch.descriptionVisible = update.descriptionVisible;
+    if (typeof update.coverDataUrl === 'string') {
+      if (update.coverDataUrl && !/^data:image\/(?:jpeg|png|webp|gif|bmp);base64,/.test(update.coverDataUrl)) {
+        throw new Error('封面数据格式不受支持');
+      }
+      patch.coverDataUrl = update.coverDataUrl;
+      patch.coverPath = String(update.coverPath || '');
+    }
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('节目窗口已关闭');
     mainWindow.webContents.send('backstage:update-track', patch);
     return { ok: true };
   });
+  ipcMain.handle('backstage:command', (event, command) => {
+    if (event.sender !== backstageWindow?.webContents) throw new Error('无权操作节目');
+    const allowed = new Set([
+      'import', 'select-track', 'play-pause', 'previous', 'next', 'seek', 'volume',
+      'comment-opacity', 'mock-danmaku', 'unparsed-as-comment', 'leave-program',
+    ]);
+    if (!allowed.has(command?.type)) throw new Error('不支持的后台操作');
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('节目窗口已关闭');
+    mainWindow.webContents.send('backstage:command', { type: command.type, payload: command.payload });
+    return { ok: true };
+  });
+  ipcMain.handle('backstage:feedback', (event, feedback) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('无权发送后台提示');
+    if (backstageWindow && !backstageWindow.isDestroyed()) {
+      backstageWindow.webContents.send('backstage:feedback', {
+        message: String(feedback?.message || '').slice(0, 500),
+        type: feedback?.type === 'error' ? 'error' : 'info',
+      });
+    }
+    return { ok: true };
+  });
 
-  ipcMain.handle('media:select', async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+  ipcMain.handle('media:select', async (event) => {
+    const result = await dialog.showOpenDialog(dialogOwner(event), {
       title: '导入音频或视频',
       properties: ['openFile', 'multiSelections'],
       filters: [
@@ -324,8 +415,8 @@ function registerIpc() {
   });
 
   ipcMain.handle('media:inspect', (_event, paths) => inspectMediaFiles(paths));
-  ipcMain.handle('media:select-cover', async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+  ipcMain.handle('media:select-cover', async (event) => {
+    const result = await dialog.showOpenDialog(dialogOwner(event), {
       title: '选择曲目封面',
       properties: ['openFile'],
       filters: [{ name: '封面图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
@@ -370,8 +461,8 @@ function registerIpc() {
   ipcMain.handle('archive:start', (_event, metadata) => archiveStore.startSession(metadata));
   ipcMain.handle('archive:append', (_event, sessionId, entry) => archiveStore.append(sessionId, entry));
   ipcMain.handle('archive:finish', (_event, sessionId, summary) => archiveStore.finishSession(sessionId, summary));
-  ipcMain.handle('archive:export-csv', async (_event, sessionId) => {
-    const result = await dialog.showSaveDialog(mainWindow, {
+  ipcMain.handle('archive:export-csv', async (event, sessionId) => {
+    const result = await dialog.showSaveDialog(dialogOwner(event), {
       title: '导出评论与评分',
       defaultPath: `品味大战-${new Date().toISOString().slice(0, 10)}.csv`,
       filters: [{ name: 'CSV 表格', extensions: ['csv'] }],

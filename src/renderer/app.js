@@ -13,6 +13,9 @@ const state = {
   sessionId: null,
   sessionPath: '',
   connected: false,
+  connectionStatus: 'disconnected',
+  connectionMessage: '模拟弹幕模式',
+  lastProgressPublish: 0,
   audioContext: null,
   analyser: null,
   mediaSource: null,
@@ -59,14 +62,29 @@ function trackForRound(roundId) {
 function publishBackstageState() {
   api.publishBackstageState({
     currentTrackId: currentTrack()?.id || '',
+    sessionId: state.sessionId || '',
     tracks: state.tracks.map((track) => ({
       id: track.id,
       number: track.roundId,
       title: track.title,
+      submitter: track.submitter || track.artist || '',
+      hasCover: Boolean(track.coverDataUrl),
+      coverPath: track.coverPath || '',
+      duration: track.duration || 0,
       type: track.type,
       description: track.description || '',
       descriptionVisible: Boolean(track.descriptionVisible),
     })),
+    playback: {
+      currentTime: elements.mediaElement.currentTime || 0,
+      duration: Number.isFinite(elements.mediaElement.duration) ? elements.mediaElement.duration : currentTrack()?.duration || 0,
+      paused: elements.mediaElement.paused,
+      volume: elements.mediaElement.volume,
+      commentOpacity: Number(elements.commentOpacityInput.value),
+      programMode: document.body.classList.contains('program-mode'),
+      unparsedAsComment: elements.unparsedCommentInput.checked,
+    },
+    connection: { status: state.connectionStatus, message: state.connectionMessage },
   }).catch((error) => console.error('backstage sync failed', error));
 }
 
@@ -84,6 +102,7 @@ function showToast(message, type = 'info', duration = 3600) {
   toast.textContent = message;
   elements.toastContainer.appendChild(toast);
   setTimeout(() => toast.remove(), duration);
+  api.sendBackstageFeedback(message, type).catch((error) => console.error('backstage feedback failed', error));
 }
 
 async function ensureArchive() {
@@ -91,8 +110,10 @@ async function ensureArchive() {
     state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 2 });
   }
   const session = await state.sessionPromise;
+  const isNewSession = state.sessionId !== session.sessionId;
   state.sessionId = session.sessionId;
   state.sessionPath = session.filePath;
+  if (isNewSession) publishBackstageState();
   return session;
 }
 
@@ -333,17 +354,38 @@ function saveTrackMetadata() {
 function applyBackstageUpdate(update) {
   const track = state.tracks.find((item) => item.id === update.id);
   if (!track) return;
+  const previousTitle = track.title;
+  const previousSubmitter = track.submitter || '';
+  const previousCover = track.coverDataUrl || '';
   const previousDescription = track.description || '';
   const previousVisible = Boolean(track.descriptionVisible);
+  if (typeof update.title === 'string' && update.title.trim()) track.title = update.title.trim().slice(0, 120);
+  if (typeof update.submitter === 'string') track.submitter = update.submitter.trim().slice(0, 80);
+  if (typeof update.coverDataUrl === 'string') {
+    track.coverDataUrl = update.coverDataUrl;
+    track.coverPath = update.coverPath || '';
+  }
   if (typeof update.description === 'string') track.description = update.description.trim().slice(0, 500);
   if (typeof update.descriptionVisible === 'boolean') track.descriptionVisible = update.descriptionVisible;
-  if (track.description === previousDescription && track.descriptionVisible === previousVisible) return;
-  if (track.id === currentTrack()?.id) renderTrackDescription();
-  publishBackstageState();
+  const metadataChanged = track.title !== previousTitle
+    || (track.submitter || '') !== previousSubmitter
+    || (track.coverDataUrl || '') !== previousCover;
+  if (!metadataChanged && track.description === previousDescription && track.descriptionVisible === previousVisible) return;
+  if (track.id === currentTrack()?.id) {
+    elements.trackTitle.textContent = track.title;
+    elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
+    elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
+    elements.coverImage.src = track.coverDataUrl || '';
+    elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+    renderTrackDescription();
+  }
+  renderPlaylist();
   archive({
-    type: 'track_description_updated',
+    type: metadataChanged ? 'track_metadata_updated' : 'track_description_updated',
     roundId: track.roundId,
     trackTitle: track.title,
+    submitter: track.submitter || '',
+    coverPath: track.coverPath || '',
     description: track.description,
     descriptionVisible: track.descriptionVisible,
   });
@@ -482,6 +524,12 @@ function sendMockDanmaku() {
   const message = elements.mockMessageInput.value.trim();
   if (!message) return;
   const name = elements.mockNameInput.value.trim() || '测试观众';
+  emitMockDanmaku(name, message);
+  elements.mockMessageInput.value = '';
+  elements.mockMessageInput.focus();
+}
+
+function emitMockDanmaku(name, message) {
   processDanmaku({
     open_id: `mock-${hashName(name)}`,
     uname: name,
@@ -489,18 +537,19 @@ function sendMockDanmaku() {
     msg_id: crypto.randomUUID(),
     timestamp: Math.floor(Date.now() / 1000),
   }, 'mock');
-  elements.mockMessageInput.value = '';
-  elements.mockMessageInput.focus();
 }
 
 function setConnectionState(status, message) {
   const connected = status === 'connected';
   state.connected = connected;
+  state.connectionStatus = status;
+  state.connectionMessage = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
   elements.connectionDot.className = `status-dot ${connected ? 'connected' : status === 'error' ? 'error' : ''}`;
   elements.connectionText.textContent = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
   elements.dialogStatus.textContent = message || '';
   elements.connectButton.disabled = ['starting', 'reconnecting'].includes(status);
   elements.disconnectButton.disabled = !connected && status !== 'reconnecting';
+  publishBackstageState();
 }
 
 async function loadConfig() {
@@ -575,6 +624,7 @@ async function exportArchive() {
 
 async function enterProgramMode() {
   document.body.classList.add('program-mode');
+  publishBackstageState();
   try {
     await document.documentElement.requestFullscreen();
   } catch {
@@ -585,6 +635,7 @@ async function enterProgramMode() {
 
 function leaveProgramMode() {
   document.body.classList.remove('program-mode');
+  publishBackstageState();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
 
@@ -594,10 +645,12 @@ function setupMediaEvents() {
   media.addEventListener('play', () => {
     elements.playButton.textContent = 'Ⅱ';
     elements.programFrame.classList.add('playing');
+    publishBackstageState();
   });
   media.addEventListener('pause', () => {
     elements.playButton.textContent = '▶';
     elements.programFrame.classList.remove('playing');
+    publishBackstageState();
   });
   media.addEventListener('loadedmetadata', () => {
     const track = currentTrack();
@@ -609,6 +662,10 @@ function setupMediaEvents() {
     elements.currentTime.textContent = formatTime(media.currentTime);
     const progress = media.duration ? Math.round((media.currentTime / media.duration) * 1000) : 0;
     elements.progressInput.value = String(progress);
+    if (Date.now() - state.lastProgressPublish > 400) {
+      state.lastProgressPublish = Date.now();
+      publishBackstageState();
+    }
   });
   media.addEventListener('ended', () => {
     archive({ type: 'track_completed', roundId: currentTrack()?.roundId, trackTitle: currentTrack()?.title });
@@ -629,6 +686,66 @@ function setCommentOpacity(value, persist = true) {
   document.documentElement.style.setProperty('--comment-panel-blur', `${Math.round(alpha * 14)}px`);
   document.documentElement.style.setProperty('--comment-panel-border-alpha', (alpha * .15).toFixed(3));
   if (persist) localStorage.setItem('commentPanelOpacity', String(percent));
+  publishBackstageState();
+}
+
+async function handleBackstageCommand(command) {
+  const payload = command.payload || {};
+  switch (command.type) {
+    case 'import':
+      if (!Array.isArray(payload.items)) throw new Error('导入列表无效');
+      await addTracks(payload.items);
+      break;
+    case 'select-track': {
+      const index = state.tracks.findIndex((track) => track.id === payload.id);
+      if (index < 0) throw new Error('曲目已不存在');
+      await loadTrack(index, true);
+      break;
+    }
+    case 'play-pause':
+      await togglePlayback();
+      break;
+    case 'previous':
+      goRelative(-1);
+      break;
+    case 'next':
+      goRelative(1);
+      break;
+    case 'seek': {
+      const duration = elements.mediaElement.duration;
+      if (Number.isFinite(duration) && duration > 0) {
+        const progress = Math.max(0, Math.min(1000, Number(payload.progress) || 0));
+        elements.mediaElement.currentTime = duration * progress / 1000;
+        publishBackstageState();
+      }
+      break;
+    }
+    case 'volume': {
+      const volume = Math.max(0, Math.min(1, Number(payload.value) || 0));
+      elements.mediaElement.volume = volume;
+      elements.volumeInput.value = String(volume);
+      publishBackstageState();
+      break;
+    }
+    case 'comment-opacity':
+      setCommentOpacity(payload.value);
+      break;
+    case 'mock-danmaku': {
+      const message = String(payload.message || '').trim();
+      if (!message) throw new Error('请输入模拟弹幕');
+      emitMockDanmaku(String(payload.name || '').trim() || '测试观众', message);
+      break;
+    }
+    case 'unparsed-as-comment':
+      elements.unparsedCommentInput.checked = Boolean(payload.value);
+      publishBackstageState();
+      break;
+    case 'leave-program':
+      leaveProgramMode();
+      break;
+    default:
+      throw new Error('不支持的后台操作');
+  }
 }
 
 function setupVisualizer() {
@@ -726,12 +843,14 @@ function bindEvents() {
   });
   elements.volumeInput.addEventListener('input', () => {
     elements.mediaElement.volume = Number(elements.volumeInput.value);
+    publishBackstageState();
   });
   elements.commentOpacityInput.addEventListener('input', () => setCommentOpacity(elements.commentOpacityInput.value));
   elements.sendMockButton.addEventListener('click', sendMockDanmaku);
   elements.mockMessageInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') sendMockDanmaku();
   });
+  elements.unparsedCommentInput.addEventListener('change', publishBackstageState);
   elements.settingsButton.addEventListener('click', async () => {
     await loadConfig();
     elements.settingsDialog.showModal();
@@ -757,10 +876,14 @@ function bindEvents() {
   });
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) document.body.classList.remove('program-mode');
+    publishBackstageState();
   });
 
   api.onLiveState((payload) => setConnectionState(payload.status, payload.message));
   api.onBackstageUpdate(applyBackstageUpdate);
+  api.onBackstageCommand((command) => {
+    handleBackstageCommand(command).catch((error) => showToast(error.message, 'error', 6000));
+  });
   api.onDiagnostic((payload) => showToast(payload.message, payload.level === 'error' ? 'error' : 'info', 6000));
   api.onLiveMessage((payload) => {
     if (payload.cmd === 'LIVE_OPEN_PLATFORM_DM' && payload.data) processDanmaku(payload.data, 'live');
@@ -806,7 +929,10 @@ async function initialize() {
     processDanmaku({ open_id: 'qa-1', uname: '银河汽水', msg: '#01 9.7', msg_id: 'qa-score-1-revised' }, 'mock');
     if (qaVideo) setCommentOpacity(46, false);
   }
-  if (query.get('program') === '1') document.body.classList.add('program-mode');
+  if (query.get('program') === '1') {
+    document.body.classList.add('program-mode');
+    publishBackstageState();
+  }
 }
 
 initialize().catch((error) => showToast(`初始化失败：${error.message}`, 'error', 8000));

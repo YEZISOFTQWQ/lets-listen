@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld('tasteArena', {
     ipcRenderer.on('backstage:update-track', listener);
     return () => ipcRenderer.removeListener('backstage:update-track', listener);
   },
+  onBackstageCommand: (callback) => {
+    const listener = (_event, command) => callback(command);
+    ipcRenderer.on('backstage:command', listener);
+    return () => ipcRenderer.removeListener('backstage:command', listener);
+  },
+  sendBackstageFeedback: (message, type) => ipcRenderer.invoke('backstage:feedback', { message, type }),
   pathForFile: (file) => webUtils.getPathForFile(file),
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
