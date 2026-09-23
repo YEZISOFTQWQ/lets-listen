@@ -7,7 +7,7 @@ const path = require('node:path');
 
 function ffmpegCandidates(customPath = '') {
   const bundled = path.join(process.resourcesPath || '', 'ffmpeg.exe');
-  return [customPath.trim(), process.env.FFMPEG_PATH || '', fs.existsSync(bundled) ? bundled : '', 'ffmpeg']
+  return [String(customPath || '').trim(), process.env.FFMPEG_PATH || '', fs.existsSync(bundled) ? bundled : '', 'ffmpeg']
     .filter(Boolean);
 }
 
@@ -16,7 +16,7 @@ function probeExecutable(candidate) {
     const child = spawn(candidate, ['-hide_banner', '-version'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     let output = '';
     const timeout = setTimeout(() => child.kill(), 5000);
-    child.stdout.on('data', (chunk) => { output += chunk.toString().slice(0, 500); });
+    child.stdout.on('data', (chunk) => { output = (output + chunk.toString()).slice(0, 500); });
     child.on('error', () => { clearTimeout(timeout); resolve(false); });
     child.on('close', (code) => {
       clearTimeout(timeout);
@@ -36,7 +36,8 @@ function buildRtmpTarget(server, key) {
   const address = String(server || '').trim();
   const secret = String(key || '').trim();
   if (!/^rtmps?:\/\/[^\s]+$/i.test(address)) throw new Error('请输入以 rtmp:// 或 rtmps:// 开头的推流服务器地址');
-  if (!secret || /\s/.test(secret)) throw new Error('请输入有效的串流密钥');
+  if (!secret || /[\s\u0000-\u001f\u007f]/u.test(secret)
+    || /[\u0000-\u001f\u007f]/u.test(address)) throw new Error('请输入有效的串流密钥或推流地址');
   return secret.startsWith('?') ? `${address}${secret}` : `${address.replace(/\/+$/, '')}/${secret.replace(/^\/+/, '')}`;
 }
 
@@ -59,9 +60,13 @@ function buildFfmpegArgs({ target, mode, quality = '720p' }) {
 }
 
 class StreamController extends EventEmitter {
-  constructor() {
+  constructor({ resolveExecutable = findFfmpeg, spawnProcess = spawn } = {}) {
     super();
+    this.resolveExecutable = resolveExecutable;
+    this.spawnProcess = spawnProcess;
     this.child = null;
+    this.starting = false;
+    this.generation = 0;
     this.status = { status: 'idle', message: '未推流' };
     this.target = '';
     this.mode = '';
@@ -74,22 +79,28 @@ class StreamController extends EventEmitter {
     this.emit('state', this.status);
   }
 
-  async start(options) {
-    if (this.child) throw new Error('已有推流或测试录制正在运行');
-    const executable = await findFfmpeg(String(options.ffmpegPath || ''));
+  async start(options = {}) {
+    if (this.child || this.starting) throw new Error('已有推流或测试录制正在运行');
     const mode = options.mode === 'test' ? 'test' : 'live';
     const target = mode === 'test'
       ? String(options.filePath || '')
       : buildRtmpTarget(options.server, options.key);
     if (!target) throw new Error('未选择测试录制文件');
+    this.starting = true;
+    const generation = ++this.generation;
+    this.update('starting', '正在检查 FFmpeg…');
+    try {
+    const executable = await this.resolveExecutable(String(options.ffmpegPath || ''));
+    if (generation !== this.generation) throw new Error('推流启动已取消');
     this.target = target;
     this.mode = mode;
     this.intentionalStop = false;
-    const child = spawn(executable, buildFfmpegArgs({ target, mode, quality: options.quality }), {
+    const child = this.spawnProcess(executable, buildFfmpegArgs({ target, mode, quality: options.quality }), {
       windowsHide: true,
       stdio: ['pipe', 'ignore', 'pipe'],
     });
     this.child = child;
+    this.starting = false;
     this.update('starting', mode === 'test' ? '正在启动本地测试录制…' : '正在启动内置推流…');
     let lastError = '';
     child.stderr.on('data', (data) => {
@@ -99,6 +110,8 @@ class StreamController extends EventEmitter {
     child.on('error', (error) => {
       if (this.child !== child) return;
       this.child = null;
+      this.target = '';
+      this.mode = '';
       this.update('error', `FFmpeg 启动失败：${error.message}`);
     });
     child.on('close', (code) => {
@@ -117,19 +130,44 @@ class StreamController extends EventEmitter {
       this.mode = '';
     });
     return { executable, mode };
+    } catch (error) {
+      if (generation === this.generation) {
+        this.starting = false;
+        this.target = '';
+        this.mode = '';
+        this.update('error', error.message);
+      }
+      throw error;
+    }
   }
 
   writeChunk(bytes) {
     if (!this.child || this.child.stdin.destroyed) return;
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024) {
+      this.abort('录制数据无效或单块过大，推流已停止');
+      return;
+    }
     if (this.child.stdin.writableLength > 8 * 1024 * 1024) {
       this.abort('编码速度跟不上画面，请降低画质或关闭占用性能的程序');
       return;
     }
-    this.child.stdin.write(Buffer.from(bytes));
+    try {
+      this.child.stdin.write(Buffer.from(bytes));
+    } catch (error) {
+      this.abort(`编码输入失败：${error.message}`);
+    }
   }
 
   finish() {
-    if (!this.child || this.child.stdin.destroyed) return;
+    if (this.starting && !this.child) {
+      this.abort('推流启动已取消');
+      return;
+    }
+    if (!this.child) return;
+    if (this.child.stdin.destroyed) {
+      this.abort('编码输入已经关闭，推流已停止');
+      return;
+    }
     this.intentionalStop = true;
     this.update('stopping', '正在结束编码并保存文件…');
     this.child.stdin.end();
@@ -137,6 +175,8 @@ class StreamController extends EventEmitter {
   }
 
   abort(message = '推流已中止') {
+    this.generation += 1;
+    this.starting = false;
     if (this.child) {
       this.child.kill();
       this.child = null;

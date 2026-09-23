@@ -116,15 +116,27 @@ class BilibiliLiveClient extends EventEmitter {
     this.gameId = data.game_info?.game_id || '';
     this.websocketInfo = data.websocket_info;
     this.anchorInfo = data.anchor_info || null;
-    if (!this.gameId || !this.websocketInfo?.auth_body || !this.websocketInfo?.wss_link?.length) {
-      throw new Error('B站启动接口缺少 game_id 或 WebSocket 信息');
+    try {
+      if (!this.gameId || !this.websocketInfo?.auth_body || !this.websocketInfo?.wss_link?.length) {
+        throw new Error('B站启动接口缺少 game_id 或 WebSocket 信息');
+      }
+      await this.connectSocket();
+      if (!this.gameId || this.closedByUser) throw new Error('互动场次在连接期间已结束');
+      this.startAppHeartbeat();
+      return {
+        gameId: this.gameId,
+        anchorInfo: this.anchorInfo,
+      };
+    } catch (error) {
+      if (this.gameId) {
+        try {
+          await this.stop();
+        } catch (cleanupError) {
+          this.emit('diagnostic', { level: 'error', message: `关闭失败场次时出错：${cleanupError.message}` });
+        }
+      }
+      throw error;
     }
-    await this.connectSocket();
-    this.startAppHeartbeat();
-    return {
-      gameId: this.gameId,
-      anchorInfo: this.anchorInfo,
-    };
   }
 
   async connectSocket() {
@@ -149,6 +161,7 @@ class BilibiliLiveClient extends EventEmitter {
   openSocket(url) {
     return new Promise((resolve, reject) => {
       let settled = false;
+      let authenticated = false;
       const socket = new WebSocket(url);
       socket.binaryType = 'arraybuffer';
       const timeout = setTimeout(() => {
@@ -170,10 +183,17 @@ class BilibiliLiveClient extends EventEmitter {
             if (packet.operation === Operation.AUTH_REPLY) {
               const authResult = parseJsonBody(packet) || {};
               if (authResult.code !== 0) {
-                throw new Error(`长连接鉴权失败：${authResult.code}`);
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timeout);
+                  socket.close();
+                  reject(new Error(`长连接鉴权失败：${authResult.code}`));
+                }
+                return;
               }
               if (!settled) {
                 settled = true;
+                authenticated = true;
                 clearTimeout(timeout);
                 this.startSocketHeartbeat();
                 this.emitState('connected', '已连接官方弹幕长链');
@@ -184,7 +204,7 @@ class BilibiliLiveClient extends EventEmitter {
               if (message) {
                 this.emit('message', message);
                 if (message.cmd === 'LIVE_OPEN_PLATFORM_INTERACTION_END') {
-                  this.emitState('ended', 'B站已结束本场消息推送');
+                  this.handleInteractionEnd();
                 }
               }
             } else if (packet.operation === Operation.HEARTBEAT_REPLY) {
@@ -193,6 +213,12 @@ class BilibiliLiveClient extends EventEmitter {
           }
         } catch (error) {
           this.emit('diagnostic', { level: 'error', message: `弹幕包解析失败：${error.message}` });
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            socket.close();
+            reject(error);
+          }
         }
       });
 
@@ -206,14 +232,17 @@ class BilibiliLiveClient extends EventEmitter {
 
       socket.addEventListener('close', (event) => {
         clearTimeout(timeout);
-        this.stopSocketHeartbeat();
-        if (this.socket === socket) this.socket = null;
+        const wasCurrent = this.socket === socket;
+        if (wasCurrent) {
+          this.stopSocketHeartbeat();
+          this.socket = null;
+        }
         if (!settled) {
           settled = true;
           reject(new Error(`WebSocket 提前关闭（${event.code}）`));
           return;
         }
-        if (!this.closedByUser && this.gameId) {
+        if (authenticated && wasCurrent && !this.closedByUser && this.gameId) {
           this.emitState('reconnecting', '弹幕长链断开，正在重连…');
           this.scheduleReconnect();
         }
@@ -254,6 +283,19 @@ class BilibiliLiveClient extends EventEmitter {
     this.appHeartbeat = null;
   }
 
+  handleInteractionEnd() {
+    this.closedByUser = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.stopSocketHeartbeat();
+    this.stopAppHeartbeat();
+    this.gameId = '';
+    const socket = this.socket;
+    this.socket = null;
+    socket?.close(1000, 'interaction ended');
+    this.emitState('ended', 'B站已结束本场消息推送');
+  }
+
   scheduleReconnect() {
     if (this.reconnectTimer || this.closedByUser) return;
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempt);
@@ -281,13 +323,15 @@ class BilibiliLiveClient extends EventEmitter {
     }
 
     const gameId = this.gameId;
-    this.gameId = '';
     if (gameId) {
       try {
         await this.request('/v2/app/end', createEndBody(gameId, this.config.appId));
-      } finally {
-        this.emitState('disconnected', '互动场次已关闭');
+      } catch (error) {
+        this.emitState('error', `关闭互动场次失败，请重试：${error.message}`);
+        throw error;
       }
+      this.gameId = '';
+      this.emitState('disconnected', '互动场次已关闭');
     } else {
       this.emitState('disconnected', '未连接');
     }
@@ -311,4 +355,3 @@ module.exports = {
   createStartBody,
   createEndBody,
 };
-

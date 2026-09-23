@@ -3,11 +3,11 @@
 const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { BilibiliLiveClient } = require('./lib/bilibili-client.cjs');
 const { ArchiveStore } = require('./lib/archive-store.cjs');
 const { StreamController, findFfmpeg } = require('./lib/stream-controller.cjs');
+const { inspectMediaFiles, readCoverFile, MAX_COVER_BYTES } = require('./lib/media-inspector.cjs');
 
 let mainWindow;
 let backstageWindow;
@@ -15,10 +15,12 @@ let backstageState = {
   currentTrackId: '',
   tracks: [],
   playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, commentOpacity: 72, programMode: false, unparsedAsComment: true },
-  connection: { status: 'disconnected', message: '模拟弹幕模式' },
+  connection: { status: 'disconnected', message: '模拟弹幕模式', canDisconnect: false },
   sessionId: '',
 };
 let liveClient;
+let liveOperation;
+let shutdownCleanupStarted = false;
 let archiveStore;
 const streamController = new StreamController();
 let activeCaptureId = '';
@@ -83,47 +85,6 @@ async function writeStoredConfig(input) {
     accessKey: config.accessKey,
     hasSecret: Boolean(secret),
   };
-}
-
-async function inspectMediaFiles(filePaths) {
-  const { parseFile } = await import('music-metadata');
-  const inspected = [];
-  for (const filePath of filePaths) {
-    try {
-      const extension = path.extname(filePath).toLowerCase();
-      const type = ['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi'].includes(extension)
-        ? 'video'
-        : 'audio';
-      let metadata = {};
-      let coverDataUrl = '';
-      try {
-        metadata = await parseFile(filePath, { duration: true, skipPostHeaders: true });
-        const picture = metadata.common?.picture?.[0];
-        if (picture?.data?.length) {
-          coverDataUrl = `data:${picture.format || 'image/jpeg'};base64,${Buffer.from(picture.data).toString('base64')}`;
-        }
-      } catch {
-        // Video containers and uncommon codecs may not expose tags; playback can still work.
-      }
-      inspected.push({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        path: filePath,
-        url: pathToFileURL(filePath).href,
-        type,
-        title: metadata.common?.title || path.basename(filePath, extension),
-        artist: metadata.common?.artist || '',
-        submitter: metadata.common?.artist || '',
-        album: metadata.common?.album || '',
-        duration: Number(metadata.format?.duration || 0),
-        coverDataUrl,
-        description: '',
-        descriptionVisible: false,
-      });
-    } catch (error) {
-      inspected.push({ path: filePath, error: error.message });
-    }
-  }
-  return inspected;
 }
 
 function openBackstageWindow() {
@@ -223,10 +184,13 @@ function createWindow() {
   const qaExit = process.argv.includes('--qa-exit');
   const qaDescription = process.argv.includes('--qa-description');
   const qaStream = process.argv.includes('--qa-stream');
+  const qaStreamErrors = process.argv.includes('--qa-stream-errors');
+  const qaRealVideo = process.argv.includes('--qa-real-video');
+  const qaLiveExit = process.argv.includes('--qa-live-exit');
   const qaComments = process.argv.includes('--qa-comments');
   mainWindow.loadFile(
     path.join(__dirname, 'renderer', 'index.html'),
-    qaDemo || qaProgram || qaVideo ? { query: { qa: qaDemo ? '1' : '0', program: qaProgram ? '1' : '0', video: qaVideo ? '1' : '0' } } : undefined,
+    qaDemo || qaProgram || qaVideo ? { query: { qa: qaDemo ? '1' : '0', program: qaProgram ? '1' : '0', video: qaVideo ? '1' : '0', tone: qaStream ? '1' : '0' } } : undefined,
   );
   if (process.argv.includes('--dev')) mainWindow.webContents.openDevTools({ mode: 'detach' });
 
@@ -262,11 +226,20 @@ function createWindow() {
             renderComments();
             const stream = document.getElementById('commentStream');
             return { normal, fullscreen: stream.children.length,
-              clientHeight: stream.clientHeight, scrollHeight: stream.scrollHeight };
+              clientHeight: stream.clientHeight, scrollHeight: stream.scrollHeight,
+              videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
+              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
+              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
+              instructionsHidden: getComputedStyle(document.querySelector('.instruction-strip')).display === 'none',
+              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none' };
           })()`);
           if (result.fullscreen <= result.normal || result.fullscreen <= 4
             || result.scrollHeight > result.clientHeight + 2) {
             throw new Error(`全屏乐评未扩容或溢出: ${JSON.stringify(result)}`);
+          }
+          if (qaVideo && (!result.videoMode || !result.trackHidden || !result.scoreHidden
+            || !result.instructionsHidden || !result.commentsVisible)) {
+            throw new Error(`视频模式未只保留评论栏: ${JSON.stringify(result)}`);
           }
           console.log(`[qa] fullscreen comments passed (${result.normal} -> ${result.fullscreen})`);
           app.quit();
@@ -276,12 +249,150 @@ function createWindow() {
         }
       }, qaDemo ? 1800 : 1200);
     });
+  } else if (qaLiveExit) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        let stopCount = 0;
+        liveClient = {
+          gameId: 'qa-pending-session',
+          closedByUser: true,
+          async stop() { stopCount += 1; this.gameId = ''; },
+          removeAllListeners() {},
+        };
+        app.once('will-quit', () => {
+          if (stopCount === 1) console.log('[qa] pending live session retried on quit');
+          else {
+            console.error(`[qa] live exit cleanup failed: stopCount=${stopCount}`);
+            process.exitCode = 1;
+          }
+        });
+        app.quit();
+      }, 1200);
+    });
+  } else if (qaRealVideo) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        try {
+          const videoPath = process.env.LETS_LISTEN_QA_VIDEO;
+          if (!videoPath) throw new Error('缺少测试视频路径');
+          const inspected = await inspectMediaFiles([videoPath]);
+          if (inspected.length !== 1 || inspected[0].error || inspected[0].type !== 'video') {
+            throw new Error(`视频导入检查失败：${JSON.stringify(inspected)}`);
+          }
+          await mainWindow.webContents.executeJavaScript(`addTracks(${JSON.stringify(inspected)})`);
+          mainWindow.setFullScreen(true);
+          const result = await mainWindow.webContents.executeJavaScript(`(async () => {
+            document.body.classList.add('program-mode');
+            setCommentOpacity(46, false);
+            processDanmaku({ open_id: 'qa-video-viewer', uname: '视频观众',
+              msg: '#01评 视频画面清楚', msg_id: 'qa-video-comment' }, 'mock');
+            await loadTrack(0, true);
+            await new Promise((resolve) => setTimeout(resolve, 650));
+            const media = document.getElementById('mediaElement');
+            return {
+              paused: media.paused, time: media.currentTime, width: media.videoWidth, height: media.videoHeight,
+              videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
+              videoVisible: getComputedStyle(media).display !== 'none',
+              ambientHidden: getComputedStyle(document.querySelector('.ambient')).display === 'none',
+              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
+              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
+              instructionsHidden: getComputedStyle(document.querySelector('.instruction-strip')).display === 'none',
+              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none',
+              controlsHidden: getComputedStyle(document.querySelector('.control-surface')).display === 'none',
+              comment: document.getElementById('commentStream').textContent,
+              opacity: getComputedStyle(document.documentElement).getPropertyValue('--comment-panel-alpha').trim(),
+            };
+          })()`);
+          if (result.paused || result.time <= 0 || result.width < 640 || result.height < 360
+            || !result.videoMode || !result.videoVisible || !result.ambientHidden
+            || !result.trackHidden || !result.scoreHidden
+            || !result.instructionsHidden || !result.commentsVisible
+            || !result.controlsHidden
+            || !result.comment.includes('视频画面清楚') || result.opacity !== '0.46') {
+            throw new Error(`真实视频播放或节目布局错误：${JSON.stringify(result)}`);
+          }
+          console.log('[qa] real video import and playback passed');
+          app.quit();
+        } catch (error) {
+          console.error(`[qa] real video import and playback failed: ${error.message}`);
+          app.exit(1);
+        }
+      }, 1200);
+    });
+  } else if (qaStreamErrors) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        try {
+          openBackstageWindow();
+          await new Promise((resolve) => backstageWindow.webContents.once('did-finish-load', resolve));
+          const invalid = await backstageWindow.webContents.executeJavaScript(`
+            window.backstageApi.startStream({ mode: 'live', server: 'https://invalid.test', key: 'secret' })
+              .then(() => '', (error) => error.message)`);
+          if (!invalid.includes('rtmp://')) throw new Error(`无效推流地址未被拒绝：${invalid}`);
+          const originalResolve = streamController.resolveExecutable;
+          let releaseProbe;
+          streamController.resolveExecutable = () => new Promise((resolve) => { releaseProbe = resolve; });
+          try {
+            const options = { mode: 'test', filePath: path.join(app.getPath('temp'), 'lets-listen-cancel-qa.mp4') };
+            const begin = `window.backstageApi.startStream(${JSON.stringify(options)})
+              .then(() => ({ ok: true }), (error) => ({ ok: false, message: error.message }))`;
+            const first = backstageWindow.webContents.executeJavaScript(begin);
+            for (let retry = 0; retry < 40 && !releaseProbe; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (!releaseProbe) throw new Error(`推流启动未进入 FFmpeg 检查：${JSON.stringify(await first)}`);
+            const duplicate = await backstageWindow.webContents.executeJavaScript(begin);
+            if (duplicate.ok || !duplicate.message.includes('已有推流')) {
+              throw new Error(`重复开始推流未被拒绝：${JSON.stringify(duplicate)}`);
+            }
+            await backstageWindow.webContents.executeJavaScript('window.backstageApi.stopStream()');
+            releaseProbe('ffmpeg');
+            const canceled = await first;
+            if (canceled.ok || !canceled.message.includes('取消') || streamController.child || activeCaptureId) {
+              throw new Error(`启动中停止后仍有推流：${JSON.stringify(canceled)}`);
+            }
+          } finally {
+            streamController.resolveExecutable = originalResolve;
+            releaseProbe?.('ffmpeg');
+          }
+          console.log('[qa] stream error handling passed');
+          app.quit();
+        } catch (error) {
+          console.error(`[qa] stream error handling failed: ${error.message}`);
+          app.exit(1);
+        }
+      }, qaDemo ? 1800 : 1200);
+    });
   } else if (qaStream) {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
-        const outputPath = path.join(app.getPath('temp'), `lets-listen-stream-qa-${randomUUID()}.mp4`);
+        const outputPath = process.env.LETS_LISTEN_QA_OUTPUT
+          || path.join(app.getPath('temp'), `lets-listen-stream-qa-${randomUUID()}.mp4`);
         try {
           mainWindow.setFullScreen(true);
+          const playing = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const media = document.getElementById('mediaElement');
+            media.loop = true;
+            await ensureAudioGraph();
+            await media.play();
+            return !media.paused;
+          })()`);
+          if (!playing) throw new Error('QA 测试音无法播放');
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const visualizer = await mainWindow.webContents.executeJavaScript(`(() => {
+            const levels = new Uint8Array(state.analyser.frequencyBinCount);
+            state.analyser.getByteFrequencyData(levels);
+            const canvas = document.getElementById('visualizer');
+            const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            let drawn = false;
+            for (let index = 3; index < pixels.length; index += 4) {
+              if (pixels[index] > 0) { drawn = true; break; }
+            }
+            return { level: Math.max(...levels), width: canvas.width, height: canvas.height, drawn };
+          })()`);
+          if (visualizer.level <= 0 || visualizer.width <= 1 || visualizer.height <= 1 || !visualizer.drawn) {
+            throw new Error(`音频可视化没有绘制有效频谱：${JSON.stringify(visualizer)}`);
+          }
           openBackstageWindow();
           await new Promise((resolve) => backstageWindow.webContents.once('did-finish-load', resolve));
           const completed = new Promise((resolve, reject) => {
@@ -370,19 +481,285 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const controls = await mainWindow.webContents.executeJavaScript(`({
             volume: document.getElementById('mediaElement').volume,
+            seekTime: document.getElementById('mediaElement').currentTime,
             opacity: Number(document.getElementById('commentOpacityInput').value),
             unparsed: document.getElementById('unparsedCommentInput').checked,
             playlistCount: document.querySelectorAll('.playlist-item').length,
             comments: document.getElementById('commentStream').textContent
           })`);
-          if (Math.abs(controls.volume - 0.35) > 0.01 || controls.opacity !== 47
+          if (Math.abs(controls.volume - 0.35) > 0.01
+            || controls.seekTime < 0.4 || controls.seekTime > 0.6 || controls.opacity !== 47
             || controls.unparsed || controls.playlistCount !== 2 || !controls.comments.includes('8.3')) {
             throw new Error(`后台控制未同步到节目: ${JSON.stringify(controls)}`);
           }
+          await mainWindow.webContents.executeJavaScript(
+            `document.getElementById('mediaElement').loop = true`,
+          );
+          await backstageWindow.webContents.executeJavaScript(`window.backstageApi.command('next')`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const nextIndex = await mainWindow.webContents.executeJavaScript(`state.currentIndex`);
+          await backstageWindow.webContents.executeJavaScript(`window.backstageApi.command('previous')`);
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const previousIndex = await mainWindow.webContents.executeJavaScript(`state.currentIndex`);
+          if (nextIndex !== 1 || previousIndex !== 0) {
+            throw new Error(`后台上一首/下一首未切换曲目：${nextIndex} -> ${previousIndex}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(`window.backstageApi.command('play-pause')`);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const paused = await mainWindow.webContents.executeJavaScript(
+            `document.getElementById('mediaElement').paused`,
+          );
+          await backstageWindow.webContents.executeJavaScript(`window.backstageApi.command('play-pause')`);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const resumed = await mainWindow.webContents.executeJavaScript(
+            `document.getElementById('mediaElement').paused`,
+          );
+          if (!paused || resumed) throw new Error(`后台播放/暂停没有生效：${paused} -> ${resumed}`);
           const backstageCount = await backstageWindow.webContents.executeJavaScript(
             `document.querySelectorAll('.playlist-item').length`,
           );
           if (backstageCount !== 2) throw new Error('后台播放队列没有同步新增曲目');
+          await backstageWindow.webContents.executeJavaScript(`(() => {
+            const title = document.getElementById('titleInput');
+            const submitter = document.getElementById('submitterInput');
+            title.value = '后台更新的曲名';
+            submitter.value = '后台投稿人';
+            title.dispatchEvent(new Event('input', { bubbles: true }));
+            submitter.dispatchEvent(new Event('input', { bubbles: true }));
+            document.getElementById('saveButton').click();
+          })()`);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const metadata = await mainWindow.webContents.executeJavaScript(`({
+            title: document.getElementById('trackTitle').textContent,
+            submitter: document.getElementById('trackArtist').textContent,
+            playlistTitle: document.querySelector('.playlist-item strong')?.textContent,
+          })`);
+          if (metadata.title !== '后台更新的曲名' || metadata.submitter !== '后台投稿人'
+            || metadata.playlistTitle !== '后台更新的曲名') {
+            throw new Error(`后台曲目信息未同步: ${JSON.stringify(metadata)}`);
+          }
+          const unsavedSwitch = await backstageWindow.webContents.executeJavaScript(`(() => {
+            const title = document.getElementById('titleInput');
+            const select = document.getElementById('trackSelect');
+            const originalConfirm = window.confirm;
+            try {
+              title.value = '尚未保存的曲名';
+              title.dispatchEvent(new Event('input', { bubbles: true }));
+              window.confirm = () => false;
+              select.value = 'qa-imported-track';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              const canceled = { selected: select.value, title: title.value };
+              window.confirm = () => true;
+              select.value = 'qa-imported-track';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              const discarded = { selected: select.value, title: title.value };
+              select.value = 'qa-track';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              return { canceled, discarded };
+            } finally { window.confirm = originalConfirm; }
+          })()`);
+          if (unsavedSwitch.canceled.selected !== 'qa-track'
+            || unsavedSwitch.canceled.title !== '尚未保存的曲名'
+            || unsavedSwitch.discarded.selected !== 'qa-imported-track'
+            || unsavedSwitch.discarded.title !== '后台导入曲目') {
+            throw new Error(`切换曲目时未保护未保存资料：${JSON.stringify(unsavedSwitch)}`);
+          }
+          const invalidTitleRejected = await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.updateTrack({ id: 'qa-track', title: '  ' }).then(() => false, () => true)`,
+          );
+          if (!invalidTitleRejected) throw new Error('后台允许保存空曲名');
+          const coverDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/zQAAAABJRU5ErkJggg==';
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.updateTrack(${JSON.stringify({ id: 'qa-track', coverDataUrl, coverPath: 'qa-cover.png' })})`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const cover = await mainWindow.webContents.executeJavaScript(`({
+            trackCover: state.tracks[0].coverDataUrl,
+            displayedCover: document.getElementById('coverImage').getAttribute('src'),
+          })`);
+          if (cover.trackCover !== coverDataUrl || cover.displayedCover !== coverDataUrl) {
+            throw new Error('后台导入的封面没有同步到节目画面');
+          }
+          const revisedScore = await mainWindow.webContents.executeJavaScript(`(() => {
+            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 5.0', msg_id: 'qa-repeat-1' }, 'mock');
+            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 9.0', msg_id: 'qa-repeat-2' }, 'mock');
+            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 1.0', msg_id: 'qa-repeat-2' }, 'mock');
+            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#02 6.0', msg_id: 'qa-repeat-3' }, 'mock');
+            return {
+              bubbles: state.comments.filter((entry) => entry.kind === 'score' && entry.openId === 'qa-repeat').length,
+              score: state.scoresByRound.get('01')?.get('qa-repeat')?.score,
+              otherTrackScore: state.scoresByRound.get('02')?.get('qa-repeat')?.score,
+              count: document.getElementById('scoreCount').textContent,
+              average: document.getElementById('averageScore').textContent,
+              visible: document.getElementById('commentStream').textContent,
+            };
+          })()`);
+          if (revisedScore.bubbles !== 2 || revisedScore.score !== 9 || revisedScore.otherTrackScore !== 6
+            || revisedScore.count !== '5' || revisedScore.average !== '8.7'
+            || revisedScore.visible.includes('5.0 分') || revisedScore.visible.includes('6.0 分')
+            || revisedScore.visible.includes('1.0 分') || !revisedScore.visible.includes('9.0 分')) {
+            throw new Error(`重复评分未覆盖旧消息: ${JSON.stringify(revisedScore)}`);
+          }
+          const exportPath = path.join(app.getPath('temp'), `lets-listen-export-qa-${randomUUID()}.csv`);
+          const originalSaveDialog = dialog.showSaveDialog;
+          try {
+            dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportPath });
+            const exportResult = await backstageWindow.webContents.executeJavaScript(
+              `window.backstageApi.exportArchiveCsv(${JSON.stringify(backstageState.sessionId)})`,
+            );
+            const csv = await fs.readFile(exportPath, 'utf8');
+            if (exportResult.count < 2 || !csv.includes('qa-repeat-1') || !csv.includes('qa-repeat-2')) {
+              throw new Error('后台立即导出遗漏了尚在写入队列中的评分');
+            }
+          } finally {
+            dialog.showSaveDialog = originalSaveDialog;
+            await fs.rm(exportPath, { force: true });
+          }
+          await mainWindow.webContents.executeJavaScript(`state.archiveQueue`);
+          const archivePath = archiveStore.sessions.get(backstageState.sessionId);
+          const archiveText = await fs.readFile(archivePath, 'utf8');
+          if (!archiveText.includes('qa-repeat-1') || !archiveText.includes('qa-repeat-2')) {
+            throw new Error('重复评分没有完整写入原始存档');
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.updateTrack(${JSON.stringify({
+              id: 'qa-imported-track', title: '候播曲目', submitter: '候播投稿人',
+              description: '候播曲目的简介', descriptionVisible: true,
+              coverDataUrl, coverPath: 'qa-queued-cover.png',
+            })})`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const queued = await mainWindow.webContents.executeJavaScript(`({
+            title: state.tracks[1].title,
+            submitter: state.tracks[1].submitter,
+            description: state.tracks[1].description,
+            currentTitle: document.getElementById('trackTitle').textContent,
+          })`);
+          if (queued.title !== '候播曲目' || queued.submitter !== '候播投稿人'
+            || queued.description !== '候播曲目的简介' || queued.currentTitle !== '后台更新的曲名') {
+            throw new Error(`候播曲目信息提前影响了当前曲目或没有保存：${JSON.stringify(queued)}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('select-track', { id: 'qa-imported-track' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          const badMedia = await mainWindow.webContents.executeJavaScript(`({
+            index: state.currentIndex,
+            paused: document.getElementById('mediaElement').paused,
+            toast: document.getElementById('toastContainer').textContent,
+            title: document.getElementById('trackTitle').textContent,
+            submitter: document.getElementById('trackArtist').textContent,
+            description: document.getElementById('trackDescriptionText').textContent,
+            cover: document.getElementById('coverImage').getAttribute('src'),
+          })`);
+          if (badMedia.index !== 1 || !badMedia.paused
+            || !/无法播放|媒体无法播放/.test(badMedia.toast)
+            || badMedia.title !== '候播曲目' || badMedia.submitter !== '候播投稿人'
+            || badMedia.description !== '候播曲目的简介' || badMedia.cover !== coverDataUrl) {
+            throw new Error(`无效媒体播放未安全报错: ${JSON.stringify(badMedia)}`);
+          }
+          const playbackFeedback = await backstageWindow.webContents.executeJavaScript(`({
+            message: document.getElementById('status').textContent,
+            error: document.getElementById('status').classList.contains('error'),
+          })`);
+          if (!playbackFeedback.error || !/无法播放|媒体无法播放/.test(playbackFeedback.message)) {
+            throw new Error(`坏媒体播放未提示后台：${JSON.stringify(playbackFeedback)}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('select-track', { id: 'qa-track' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const editingId = await mainWindow.webContents.executeJavaScript(`(() => {
+            openTrackEditor();
+            document.getElementById('trackTitleInput').value = '弹窗绑定原曲目';
+            return state.editingTrackId;
+          })()`);
+          if (editingId !== 'qa-track') throw new Error(`编辑弹窗绑定了错误曲目：${editingId}`);
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('select-track', { id: 'qa-imported-track' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const editorSave = await mainWindow.webContents.executeJavaScript(`(() => {
+            saveTrackMetadata();
+            return {
+              original: state.tracks[0].title,
+              next: state.tracks[1].title,
+              displayed: document.getElementById('trackTitle').textContent,
+              currentIndex: state.currentIndex,
+              dialogOpen: document.getElementById('trackEditDialog').open,
+            };
+          })()`);
+          if (editorSave.original !== '弹窗绑定原曲目' || editorSave.next !== '候播曲目'
+            || editorSave.displayed !== '候播曲目' || editorSave.currentIndex !== 1 || editorSave.dialogOpen) {
+            throw new Error(`切歌后编辑弹窗误改曲目：${JSON.stringify(editorSave)}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('select-track', { id: 'qa-track' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          await mainWindow.webContents.executeJavaScript(`(() => {
+            openTrackEditor();
+            document.getElementById('trackTitleInput').value = '旧弹窗填写的标题';
+          })()`);
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.updateTrack({ id: 'qa-track', title: '后台并发新标题' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const concurrentEdit = await mainWindow.webContents.executeJavaScript(`(() => {
+            saveTrackMetadata();
+            const result = {
+              title: state.tracks[0].title,
+              stale: state.editingTrackStale,
+              dialogOpen: document.getElementById('trackEditDialog').open,
+            };
+            document.getElementById('trackEditDialog').close();
+            return result;
+          })()`);
+          if (concurrentEdit.title !== '后台并发新标题'
+            || !concurrentEdit.stale || !concurrentEdit.dialogOpen) {
+            throw new Error(`旧编辑弹窗覆盖了后台并发修改：${JSON.stringify(concurrentEdit)}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.command('select-track', { id: 'missing-qa-track' })`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const backstageError = await backstageWindow.webContents.executeJavaScript(`({
+            message: document.getElementById('status').textContent,
+            error: document.getElementById('status').classList.contains('error'),
+          })`);
+          if (!backstageError.error || !backstageError.message.includes('曲目已不存在')) {
+            throw new Error(`后台误操作未收到错误提示：${JSON.stringify(backstageError)}`);
+          }
+          sendToRenderer('live:state', {
+            status: 'error', message: '关闭互动场次失败，请重试', gameId: 'qa-retry-game',
+          });
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const retryButtons = {
+            main: await mainWindow.webContents.executeJavaScript(
+              `document.getElementById('disconnectButton').disabled`,
+            ),
+            backstage: await backstageWindow.webContents.executeJavaScript(
+              `document.getElementById('disconnectButton').disabled`,
+            ),
+          };
+          if (retryButtons.main || retryButtons.backstage) {
+            throw new Error(`结束接口失败后无法重新断开：${JSON.stringify(retryButtons)}`);
+          }
+          if (qaProgram) {
+            const previousBackstage = backstageWindow;
+            const closed = new Promise((resolve) => previousBackstage.once('closed', resolve));
+            previousBackstage.close();
+            await closed;
+            await mainWindow.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', {
+              ctrlKey: true, shiftKey: true, code: 'KeyD', bubbles: true,
+            }))`);
+            for (let retry = 0; retry < 40 && !backstageWindow; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (!backstageWindow || backstageWindow.isDestroyed() || !backstageWindow.isVisible()) {
+              throw new Error('节目模式快捷键未重新打开直播后台');
+            }
+          }
           console.log('[qa] backstage controls and description passed');
           app.quit();
         } catch (error) {
@@ -405,6 +782,16 @@ function attachLiveClient(client) {
   client.on('state', (payload) => sendToRenderer('live:state', payload));
   client.on('message', (payload) => sendToRenderer('live:message', payload));
   client.on('diagnostic', (payload) => sendToRenderer('live:diagnostic', payload));
+}
+
+function runLiveOperation(work) {
+  if (liveOperation) throw new Error('直播连接操作正在进行，请稍后重试');
+  const operation = Promise.resolve().then(work);
+  liveOperation = operation;
+  operation.finally(() => {
+    if (liveOperation === operation) liveOperation = null;
+  }).catch(() => {});
+  return operation;
 }
 
 function registerIpc() {
@@ -446,6 +833,7 @@ function registerIpc() {
       connection: {
         status: String(snapshot?.connection?.status || 'disconnected'),
         message: String(snapshot?.connection?.message || ''),
+        canDisconnect: Boolean(snapshot?.connection?.canDisconnect),
       },
       sessionId: String(snapshot?.sessionId || ''),
     };
@@ -471,6 +859,9 @@ function registerIpc() {
     if (typeof update.description === 'string') patch.description = update.description.trim().slice(0, 500);
     if (typeof update.descriptionVisible === 'boolean') patch.descriptionVisible = update.descriptionVisible;
     if (typeof update.coverDataUrl === 'string') {
+      if (update.coverDataUrl.length > Math.ceil(MAX_COVER_BYTES * 4 / 3) + 100) {
+        throw new Error('封面图片不能超过 10 MB');
+      }
       if (update.coverDataUrl && !/^data:image\/(?:jpeg|png|webp|gif|bmp);base64,/.test(update.coverDataUrl)) {
         throw new Error('封面数据格式不受支持');
       }
@@ -524,41 +915,42 @@ function registerIpc() {
       filters: [{ name: '封面图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
     });
     if (result.canceled || !result.filePaths[0]) return null;
-    const filePath = result.filePaths[0];
-    const extension = path.extname(filePath).toLowerCase();
-    const mimeTypes = {
-      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-      '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
-    };
-    const data = await fs.readFile(filePath);
-    return {
-      path: filePath,
-      dataUrl: `data:${mimeTypes[extension] || 'application/octet-stream'};base64,${data.toString('base64')}`,
-    };
+    return readCoverFile(result.filePaths[0]);
   });
   ipcMain.handle('config:get', () => readStoredConfig(false));
   ipcMain.handle('config:save', (_event, config) => writeStoredConfig(config));
 
-  ipcMain.handle('live:connect', async (_event, identityCode) => {
-    if (liveClient) await liveClient.stop().catch(() => {});
+  ipcMain.handle('live:connect', (_event, identityCode) => runLiveOperation(async () => {
+    if (liveClient) {
+      const previous = liveClient;
+      await previous.stop();
+      previous.removeAllListeners();
+      if (liveClient === previous) liveClient = null;
+    }
     const config = await readStoredConfig(true);
-    liveClient = new BilibiliLiveClient(config);
-    attachLiveClient(liveClient);
+    const client = new BilibiliLiveClient(config);
+    liveClient = client;
+    attachLiveClient(client);
     try {
-      return await liveClient.start(identityCode);
+      return await client.start(identityCode);
     } catch (error) {
-      sendToRenderer('live:state', { status: 'error', message: error.message });
+      if (!client.gameId) {
+        if (liveClient === client) liveClient = null;
+        client.removeAllListeners();
+      }
+      sendToRenderer('live:state', { status: 'error', message: error.message, gameId: client.gameId || null });
       throw error;
     }
-  });
+  }));
 
-  ipcMain.handle('live:disconnect', async () => {
+  ipcMain.handle('live:disconnect', () => runLiveOperation(async () => {
     if (!liveClient) return { ok: true };
-    await liveClient.stop();
-    liveClient.removeAllListeners();
-    liveClient = null;
+    const client = liveClient;
+    await client.stop();
+    client.removeAllListeners();
+    if (liveClient === client) liveClient = null;
     return { ok: true };
-  });
+  }));
 
   ipcMain.handle('archive:start', (_event, metadata) => archiveStore.startSession(metadata));
   ipcMain.handle('archive:append', (_event, sessionId, entry) => archiveStore.append(sessionId, entry));
@@ -570,6 +962,9 @@ function registerIpc() {
       filters: [{ name: 'CSV 表格', extensions: ['csv'] }],
     });
     if (result.canceled || !result.filePath) return null;
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
+      await mainWindow.webContents.executeJavaScript('typeof state === "undefined" ? undefined : state.archiveQueue');
+    }
     return archiveStore.exportCsv(sessionId, result.filePath);
   });
 
@@ -650,7 +1045,9 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
-  archiveStore = new ArchiveStore(path.join(app.getPath('documents'), '品味大战存档'));
+  const qaArchiveRoot = process.argv.some((argument) => argument.startsWith('--qa-'))
+    ? process.env.LETS_LISTEN_QA_ARCHIVE : '';
+  archiveStore = new ArchiveStore(qaArchiveRoot || path.join(app.getPath('documents'), '品味大战存档'));
   setupDisplayCapture();
   registerIpc();
   createWindow();
@@ -661,12 +1058,15 @@ app.whenReady().then(() => {
 
 app.on('before-quit', (event) => {
   if (activeCaptureId) streamController.abort('软件退出，推流结束');
-  if (!liveClient || liveClient.closedByUser) return;
+  if (shutdownCleanupStarted || ((!liveClient || !liveClient.gameId) && !liveOperation)) return;
   event.preventDefault();
-  liveClient.stop().catch(() => {}).finally(() => {
+  shutdownCleanupStarted = true;
+  Promise.resolve(liveOperation).catch(() => {}).then(async () => {
+    const client = liveClient;
+    if (client?.gameId) await client.stop().catch(() => {});
+    client?.removeAllListeners();
     liveClient = null;
-    app.quit();
-  });
+  }).finally(() => app.quit());
 });
 
 app.on('window-all-closed', () => {

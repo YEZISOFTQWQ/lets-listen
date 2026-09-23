@@ -5,7 +5,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 function csvCell(value) {
-  const text = value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  let text = value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  // Spreadsheet apps may execute formulas even when the CSV cell is quoted.
+  if (/^\s*[=+\-@]/u.test(text)) text = `'${text}`;
   return `"${text.replace(/"/g, '""')}"`;
 }
 
@@ -13,6 +15,7 @@ class ArchiveStore {
   constructor(rootDirectory) {
     this.rootDirectory = rootDirectory;
     this.sessions = new Map();
+    this.pendingWrites = new Map();
   }
 
   async ensureRoot() {
@@ -26,12 +29,17 @@ class ArchiveStore {
     const sessionId = crypto.randomUUID();
     const filePath = path.join(this.rootDirectory, `${stamp}-${sessionId.slice(0, 8)}.jsonl`);
     this.sessions.set(sessionId, filePath);
-    await this.append(sessionId, {
-      type: 'session_start',
-      at: now.toISOString(),
-      sessionId,
-      ...metadata,
-    });
+    try {
+      await this.append(sessionId, {
+        type: 'session_start',
+        at: now.toISOString(),
+        sessionId,
+        ...metadata,
+      });
+    } catch (error) {
+      this.sessions.delete(sessionId);
+      throw error;
+    }
     return { sessionId, filePath };
   }
 
@@ -42,7 +50,14 @@ class ArchiveStore {
       at: new Date().toISOString(),
       ...entry,
     };
-    await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+    const previous = this.pendingWrites.get(sessionId) || Promise.resolve();
+    const write = previous.catch(() => {}).then(() => fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf8'));
+    this.pendingWrites.set(sessionId, write);
+    try {
+      await write;
+    } finally {
+      if (this.pendingWrites.get(sessionId) === write) this.pendingWrites.delete(sessionId);
+    }
     return record;
   }
 
@@ -57,12 +72,19 @@ class ArchiveStore {
   async exportCsv(sessionId, destination) {
     const filePath = this.sessions.get(sessionId);
     if (!filePath) throw new Error('找不到当前存档文件');
+    if (this.pendingWrites.has(sessionId)) await this.pendingWrites.get(sessionId);
     const content = await fs.readFile(filePath, 'utf8');
-    const records = content
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line))
-      .filter((record) => ['comment', 'score'].includes(record.type));
+    const lines = content.split(/\r?\n/).filter(Boolean);
+    const records = [];
+    for (const [index, line] of lines.entries()) {
+      try {
+        const record = JSON.parse(line);
+        if (['comment', 'score'].includes(record.type)) records.push(record);
+      } catch (error) {
+        if (index !== lines.length - 1) throw error;
+        // A crash can leave the final JSONL line unfinished; keep earlier records exportable.
+      }
+    }
     const header = ['type', 'at', 'track_id', 'track_title', 'open_id', 'uname', 'score', 'comment', 'msg_id'];
     const rows = records.map((record) => [
       record.type,

@@ -2,6 +2,7 @@
 
 const api = window.tasteArena;
 const { parseDanmaku } = window.TasteCommands;
+const MAX_TRACKS = 500;
 
 const state = {
   tracks: [],
@@ -10,11 +11,13 @@ const state = {
   comments: [],
   seenMessageIds: new Set(),
   sessionPromise: null,
+  archiveQueue: Promise.resolve(),
   sessionId: null,
   sessionPath: '',
   connected: false,
   connectionStatus: 'disconnected',
   connectionMessage: '模拟弹幕模式',
+  connectionCanDisconnect: false,
   lastProgressPublish: 0,
   audioContext: null,
   analyser: null,
@@ -26,6 +29,8 @@ const state = {
   dragDepth: 0,
   pendingCoverDataUrl: '',
   pendingCoverPath: '',
+  editingTrackId: '',
+  editingTrackStale: false,
 };
 
 const elements = Object.fromEntries([
@@ -88,7 +93,8 @@ function publishBackstageState() {
       programMode: document.body.classList.contains('program-mode'),
       unparsedAsComment: elements.unparsedCommentInput.checked,
     },
-    connection: { status: state.connectionStatus, message: state.connectionMessage },
+    connection: { status: state.connectionStatus, message: state.connectionMessage,
+      canDisconnect: state.connectionCanDisconnect },
   }).catch((error) => console.error('backstage sync failed', error));
 }
 
@@ -111,7 +117,10 @@ function showToast(message, type = 'info', duration = 3600) {
 
 async function ensureArchive() {
   if (!state.sessionPromise) {
-    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 2 });
+    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 2 }).catch((error) => {
+      state.sessionPromise = null;
+      throw error;
+    });
   }
   const session = await state.sessionPromise;
   const isNewSession = state.sessionId !== session.sessionId;
@@ -121,8 +130,8 @@ async function ensureArchive() {
   return session;
 }
 
-async function archive(entry) {
-  try {
+function archive(entry) {
+  state.archiveQueue = state.archiveQueue.then(async () => {
     const session = await ensureArchive();
     const record = { ...entry };
     if (Object.hasOwn(record, 'roundId')) {
@@ -130,9 +139,8 @@ async function archive(entry) {
       delete record.roundId;
     }
     await api.appendArchive(session.sessionId, record);
-  } catch (error) {
-    console.error('archive failed', error);
-  }
+  }).catch((error) => console.error('archive failed', error));
+  return state.archiveQueue;
 }
 
 function renderPlaylist() {
@@ -179,7 +187,9 @@ function renderPlaylist() {
 }
 
 async function addTracks(items) {
-  const valid = items.filter((item) => item && !item.error && item.url);
+  if (!Array.isArray(items)) throw new Error('导入列表无效');
+  const candidates = items.filter((item) => item && !item.error && item.url);
+  const valid = candidates.slice(0, Math.max(0, MAX_TRACKS - state.tracks.length));
   const failed = items.filter((item) => item?.error);
   for (const item of valid) {
     item.roundId = String(state.tracks.length + 1).padStart(2, '0');
@@ -199,6 +209,7 @@ async function addTracks(items) {
   renderPlaylist();
   if (state.currentIndex < 0 && valid.length) loadTrack(0, false);
   if (valid.length) showToast(`已加入 ${valid.length} 个媒体文件`, 'success');
+  if (candidates.length > valid.length) showToast(`播放队列最多 ${MAX_TRACKS} 首，多余文件未导入`, 'error');
   if (failed.length) showToast(`${failed.length} 个文件无法读取`, 'error');
 }
 
@@ -366,6 +377,8 @@ function openTrackEditor() {
     showToast('请先导入并选择一首曲目');
     return;
   }
+  state.editingTrackId = track.id;
+  state.editingTrackStale = false;
   state.pendingCoverDataUrl = track.coverDataUrl || '';
   state.pendingCoverPath = track.coverPath || '';
   elements.trackTitleInput.value = track.title || '';
@@ -389,8 +402,15 @@ async function chooseTrackCover() {
 }
 
 function saveTrackMetadata() {
-  const track = currentTrack();
-  if (!track) return;
+  const track = state.tracks.find((item) => item.id === state.editingTrackId);
+  if (!track) {
+    showToast('正在编辑的曲目已不存在', 'error');
+    return;
+  }
+  if (state.editingTrackStale) {
+    showToast('该曲目已在后台修改，请关闭编辑窗口并重新打开后再保存', 'error');
+    return;
+  }
   const title = elements.trackTitleInput.value.trim();
   if (!title) {
     showToast('曲目名称不能为空', 'error');
@@ -404,12 +424,14 @@ function saveTrackMetadata() {
   track.coverPath = state.pendingCoverPath;
   track.description = elements.trackDescriptionInput.value.trim();
   track.descriptionVisible = elements.trackDescriptionVisibleInput.checked;
-  elements.trackTitle.textContent = track.title;
-  elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
-  elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
-  elements.coverImage.src = track.coverDataUrl || '';
-  elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
-  renderTrackDescription();
+  if (track.id === currentTrack()?.id) {
+    elements.trackTitle.textContent = track.title;
+    elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
+    elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
+    elements.coverImage.src = track.coverDataUrl || '';
+    elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+    renderTrackDescription();
+  }
   renderPlaylist();
   renderComments();
   archive({
@@ -422,6 +444,8 @@ function saveTrackMetadata() {
     descriptionVisible: track.descriptionVisible,
   });
   elements.trackEditDialog.close();
+  state.editingTrackId = '';
+  state.editingTrackStale = false;
   showToast('曲目信息已更新', 'success');
 }
 
@@ -445,6 +469,10 @@ function applyBackstageUpdate(update) {
     || (track.submitter || '') !== previousSubmitter
     || (track.coverDataUrl || '') !== previousCover;
   if (!metadataChanged && track.description === previousDescription && track.descriptionVisible === previousVisible) return;
+  if (track.id === state.editingTrackId && elements.trackEditDialog.open) {
+    state.editingTrackStale = true;
+    showToast('该曲目已在后台修改，当前编辑窗口需要重新打开', 'error');
+  }
   if (track.id === currentTrack()?.id) {
     elements.trackTitle.textContent = track.title;
     elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
@@ -617,16 +645,17 @@ function emitMockDanmaku(name, message) {
   }, 'mock');
 }
 
-function setConnectionState(status, message) {
+function setConnectionState(status, message, gameId = null) {
   const connected = status === 'connected';
   state.connected = connected;
   state.connectionStatus = status;
   state.connectionMessage = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
+  state.connectionCanDisconnect = Boolean(gameId);
   elements.connectionDot.className = `status-dot ${connected ? 'connected' : status === 'error' ? 'error' : ''}`;
   elements.connectionText.textContent = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
   elements.dialogStatus.textContent = message || '';
   elements.connectButton.disabled = ['starting', 'reconnecting'].includes(status);
-  elements.disconnectButton.disabled = !connected && status !== 'reconnecting';
+  elements.disconnectButton.disabled = !connected && status !== 'reconnecting' && !state.connectionCanDisconnect;
   publishBackstageState();
 }
 
@@ -671,7 +700,7 @@ async function connectLive() {
     showToast(`已连接 ${anchorName} 的直播间`, 'success');
     elements.settingsDialog.close();
   } catch (error) {
-    setConnectionState('error', error.message);
+    setConnectionState('error', error.message, state.connectionCanDisconnect);
     showToast(error.message, 'error', 6000);
   } finally {
     elements.connectButton.disabled = false;
@@ -692,6 +721,7 @@ async function disconnectLive() {
 
 async function exportArchive() {
   try {
+    await state.archiveQueue;
     const session = await ensureArchive();
     const result = await api.exportArchiveCsv(session.sessionId);
     if (result) showToast(`已导出 ${result.count} 条评论/评分`, 'success');
@@ -961,7 +991,7 @@ function bindEvents() {
   });
   window.addEventListener('resize', renderComments);
 
-  api.onLiveState((payload) => setConnectionState(payload.status, payload.message));
+  api.onLiveState((payload) => setConnectionState(payload.status, payload.message, payload.gameId));
   api.onBackstageUpdate(applyBackstageUpdate);
   api.onBackstageCommand((command) => {
     handleBackstageCommand(command).catch((error) => showToast(error.message, 'error', 6000));
@@ -997,6 +1027,11 @@ async function initialize() {
     view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, 8000, true);
     view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, 'data');
     view.setUint32(40, silentWav.length - 44, true);
+    if (query.get('tone') === '1') {
+      for (let sample = 0; sample < 8000; sample += 1) {
+        view.setInt16(44 + sample * 2, Math.round(Math.sin(2 * Math.PI * 440 * sample / 8000) * 12000), true);
+      }
+    }
     const qaVideo = query.get('video') === '1';
     await addTracks([{
       id: 'qa-track', path: 'qa-demo.wav', url: URL.createObjectURL(new Blob([silentWav], { type: 'audio/wav' })),

@@ -161,7 +161,8 @@ function render(snapshotNext) {
   elements.exportButton.disabled = !snapshot.sessionId;
   elements.connectionStatus.textContent = snapshot.connection?.message || '模拟弹幕模式';
   elements.connectButton.disabled = ['starting', 'reconnecting'].includes(snapshot.connection?.status);
-  elements.disconnectButton.disabled = !['connected', 'reconnecting'].includes(snapshot.connection?.status);
+  elements.disconnectButton.disabled = !['connected', 'reconnecting'].includes(snapshot.connection?.status)
+    && !snapshot.connection?.canDisconnect;
 }
 
 async function saveMetadata() {
@@ -306,6 +307,11 @@ elements.commentOpacityInput.addEventListener('input', () => {
   command('comment-opacity', { value: Number(elements.commentOpacityInput.value) });
 });
 elements.trackSelect.addEventListener('change', () => {
+  if (dirty && !window.confirm('当前曲目信息尚未保存，确定放弃更改并切换曲目吗？')) {
+    elements.trackSelect.value = selectedId;
+    setStatus('未保存的曲目信息已保留，请先保存或确认放弃');
+    return;
+  }
   selectedId = elements.trackSelect.value;
   dirty = false;
   renderSelected(true);

@@ -3,6 +3,10 @@
 const zlib = require('node:zlib');
 
 const HEADER_LENGTH = 16;
+const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_EXPANDED_BYTES = 16 * 1024 * 1024;
+const MAX_TOTAL_EXPANDED_BYTES = 32 * 1024 * 1024;
+const MAX_PACKETS = 10_000;
 
 const Operation = Object.freeze({
   HEARTBEAT: 2,
@@ -24,12 +28,15 @@ function encodePacket(operation, body = '', version = 0, sequence = 1) {
   return packet;
 }
 
-function parsePacketStream(input, depth = 0) {
+function parsePacketStream(input, depth = 0, budget = { expanded: 0, packets: 0 }) {
   if (depth > 4) {
     throw new Error('Bilibili packet compression nesting is too deep');
   }
 
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  if (buffer.length > (depth ? MAX_EXPANDED_BYTES : MAX_FRAME_BYTES)) {
+    throw new Error('Bilibili packet frame is too large');
+  }
   const packets = [];
   let offset = 0;
 
@@ -50,10 +57,18 @@ function parsePacketStream(input, depth = 0) {
     const body = buffer.subarray(offset + headerLength, offset + packetLength);
 
     if (version === 2) {
-      packets.push(...parsePacketStream(zlib.inflateSync(body), depth + 1));
+      const expanded = zlib.inflateSync(body, { maxOutputLength: MAX_EXPANDED_BYTES });
+      budget.expanded += expanded.length;
+      if (budget.expanded > MAX_TOTAL_EXPANDED_BYTES) throw new Error('Bilibili packet expansion limit exceeded');
+      packets.push(...parsePacketStream(expanded, depth + 1, budget));
     } else if (version === 3) {
-      packets.push(...parsePacketStream(zlib.brotliDecompressSync(body), depth + 1));
+      const expanded = zlib.brotliDecompressSync(body, { maxOutputLength: MAX_EXPANDED_BYTES });
+      budget.expanded += expanded.length;
+      if (budget.expanded > MAX_TOTAL_EXPANDED_BYTES) throw new Error('Bilibili packet expansion limit exceeded');
+      packets.push(...parsePacketStream(expanded, depth + 1, budget));
     } else {
+      budget.packets += 1;
+      if (budget.packets > MAX_PACKETS) throw new Error('Bilibili packet count limit exceeded');
       packets.push({ packetLength, headerLength, version, operation, sequence, body });
     }
 
@@ -75,9 +90,11 @@ function parseJsonBody(packet) {
 
 module.exports = {
   HEADER_LENGTH,
+  MAX_FRAME_BYTES,
+  MAX_EXPANDED_BYTES,
+  MAX_PACKETS,
   Operation,
   encodePacket,
   parsePacketStream,
   parseJsonBody,
 };
-
