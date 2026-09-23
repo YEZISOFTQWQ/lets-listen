@@ -704,6 +704,20 @@ function createWindow() {
             return state.editingTrackId;
           })()`);
           if (editingId !== 'qa-track') throw new Error(`编辑弹窗绑定了错误曲目：${editingId}`);
+          const editorSpace = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const media = document.getElementById('mediaElement');
+            const description = document.getElementById('trackDescriptionInput');
+            media.pause();
+            description.focus();
+            const space = new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true });
+            description.dispatchEvent(space);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return { focused: document.activeElement === description,
+              prevented: space.defaultPrevented, paused: media.paused };
+          })()`);
+          if (!editorSpace.focused || editorSpace.prevented || !editorSpace.paused) {
+            throw new Error(`编辑简介时空格误触发播放：${JSON.stringify(editorSpace)}`);
+          }
           await backstageWindow.webContents.executeJavaScript(
             `window.backstageApi.command('select-track', { id: 'qa-imported-track' })`,
           );
@@ -747,6 +761,28 @@ function createWindow() {
           if (concurrentEdit.title !== '后台并发新标题'
             || !concurrentEdit.stale || !concurrentEdit.dialogOpen) {
             throw new Error(`旧编辑弹窗覆盖了后台并发修改：${JSON.stringify(concurrentEdit)}`);
+          }
+          const spaceShortcut = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const media = document.getElementById('mediaElement');
+            media.pause();
+            document.activeElement?.blur();
+            const repeated = new KeyboardEvent('keydown', {
+              key: ' ', code: 'Space', repeat: true, bubbles: true, cancelable: true,
+            });
+            document.dispatchEvent(repeated);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            const repeatedPaused = media.paused;
+            const first = new KeyboardEvent('keydown', {
+              key: ' ', code: 'Space', bubbles: true, cancelable: true,
+            });
+            document.dispatchEvent(first);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return { repeatedPaused, repeatedPrevented: repeated.defaultPrevented,
+              firstPrevented: first.defaultPrevented, playing: !media.paused };
+          })()`);
+          if (!spaceShortcut.repeatedPaused || spaceShortcut.repeatedPrevented
+            || !spaceShortcut.firstPrevented || !spaceShortcut.playing) {
+            throw new Error(`空格播放快捷键或长按保护异常：${JSON.stringify(spaceShortcut)}`);
           }
           await backstageWindow.webContents.executeJavaScript(
             `window.backstageApi.command('select-track', { id: 'missing-qa-track' })`,

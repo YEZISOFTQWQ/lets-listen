@@ -983,7 +983,10 @@ function bindEvents() {
       api.openBackstage().catch((error) => console.error('open backstage failed', error));
     }
     if (event.key === 'Escape' && document.body.classList.contains('program-mode')) leaveProgramMode();
-    if (event.code === 'Space' && !['INPUT', 'BUTTON'].includes(document.activeElement?.tagName)) {
+    const focused = document.activeElement;
+    const typingOrDialog = focused?.closest('input, textarea, select, button, [contenteditable], [role="textbox"]')
+      || document.querySelector('dialog[open]');
+    if (event.code === 'Space' && !event.repeat && !event.defaultPrevented && !typingOrDialog) {
       event.preventDefault();
       togglePlayback();
     }
