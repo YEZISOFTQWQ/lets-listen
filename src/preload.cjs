@@ -7,6 +7,13 @@ contextBridge.exposeInMainWorld('tasteArena', {
   selectMedia: () => ipcRenderer.invoke('media:select'),
   inspectMedia: (paths) => ipcRenderer.invoke('media:inspect', paths),
   selectCover: () => ipcRenderer.invoke('media:select-cover'),
+  openBackstage: () => ipcRenderer.invoke('backstage:open'),
+  publishBackstageState: (snapshot) => ipcRenderer.invoke('backstage:publish-state', snapshot),
+  onBackstageUpdate: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('backstage:update-track', listener);
+    return () => ipcRenderer.removeListener('backstage:update-track', listener);
+  },
   pathForFile: (file) => webUtils.getPathForFile(file),
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),

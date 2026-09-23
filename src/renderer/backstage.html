@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>lets-listen · 简介后台</title>
+  <link rel="stylesheet" href="backstage.css">
+</head>
+<body>
+  <main>
+    <header>
+      <span class="eyebrow">LETS-LISTEN · BACKSTAGE</span>
+      <h1>歌曲简介控制台</h1>
+      <p>节目模式播放时，此窗口可独立修改简介与展示状态。</p>
+    </header>
+    <label class="field">
+      <span>选择曲目</span>
+      <select id="trackSelect" disabled><option>暂无曲目</option></select>
+    </label>
+    <div id="currentIndicator" class="current-indicator">请先在主窗口导入音频</div>
+    <label class="field">
+      <span>歌曲简介</span>
+      <textarea id="descriptionInput" maxlength="500" rows="8" placeholder="输入面向直播观众的歌曲介绍" disabled></textarea>
+    </label>
+    <div class="setting-row">
+      <label>
+        <input id="visibleInput" type="checkbox" disabled>
+        <span>在节目画面展示</span>
+      </label>
+      <span id="videoNotice"></span>
+    </div>
+    <button id="saveButton" type="button" disabled>保存并应用</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script src="backstage.js"></script>
+</body>
+</html>

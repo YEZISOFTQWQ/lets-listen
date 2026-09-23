@@ -22,6 +22,7 @@
         <span class="button-icon">＋</span> 导入音频 / 视频
       </button>
       <button id="editTrackButton" class="ghost-button wide-button edit-track-button" type="button" disabled>编辑当前曲目信息</button>
+      <button id="backstageButton" class="ghost-button wide-button edit-track-button" type="button">打开简介后台</button>
 
       <div class="section-heading">
         <span>播放队列</span>
@@ -63,7 +64,7 @@
 
         <div class="program-content">
           <section class="track-zone">
-            <div class="round-pill">ROUND <span id="roundNumber">--</span></div>
+            <div class="track-pill">TRACK <span id="trackNumber">--</span></div>
             <div id="coverFrame" class="cover-frame">
               <div id="coverFallback" class="cover-fallback">
                 <div class="record-disc"><div></div></div>
@@ -75,6 +76,10 @@
               <span>NOW PLAYING</span>
               <h2 id="trackTitle">等待选曲</h2>
               <p id="trackArtist">导入音频或视频开始品味大战</p>
+            </div>
+            <div id="trackDescriptionCard" class="track-description-card" hidden>
+              <strong>歌曲简介</strong>
+              <p id="trackDescriptionText"></p>
             </div>
             <canvas id="visualizer" aria-label="音频频谱"></canvas>
           </section>
@@ -215,6 +220,14 @@
       <label class="field-label">
         <span>投稿人名称</span>
         <input id="trackSubmitterInput" maxlength="80" placeholder="例如：小明 / 乐队名称 / 匿名投稿人">
+      </label>
+      <label class="field-label">
+        <span>歌曲简介</span>
+        <textarea id="trackDescriptionInput" maxlength="500" rows="5" placeholder="介绍创作背景、风格或想让观众注意的细节"></textarea>
+      </label>
+      <label class="description-toggle">
+        <input id="trackDescriptionVisibleInput" type="checkbox">
+        <span>在节目画面展示歌曲简介</span>
       </label>
       <div class="dialog-actions">
         <button class="ghost-button" value="cancel">取消</button>

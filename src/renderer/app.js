@@ -23,16 +23,18 @@ const state = {
 
 const elements = Object.fromEntries([
   'importButton', 'trackCount', 'playlist', 'settingsButton', 'connectionDot', 'connectionText',
-  'exportButton', 'programModeButton', 'programFrame', 'mediaElement', 'roundNumber', 'coverFrame',
+  'exportButton', 'programModeButton', 'programFrame', 'mediaElement', 'trackNumber', 'coverFrame',
   'coverImage', 'trackTitle', 'trackArtist', 'visualizer', 'averageScore', 'scoreCount', 'scoreMeter',
+  'trackDescriptionCard', 'trackDescriptionText',
   'commentStream', 'scoreHint', 'commentHint', 'previousButton', 'playButton', 'nextButton',
   'currentTime', 'progressInput', 'durationTime', 'volumeInput', 'mockNameInput', 'mockMessageInput',
   'commentOpacityInput', 'commentOpacityValue',
   'sendMockButton', 'unparsedCommentInput', 'dropOverlay', 'settingsDialog', 'appIdInput',
   'accessKeyInput', 'accessSecretInput', 'secretState', 'identityCodeInput', 'dialogStatus',
-  'saveConfigButton', 'disconnectButton', 'connectButton', 'toastContainer', 'editTrackButton',
+  'saveConfigButton', 'disconnectButton', 'connectButton', 'toastContainer', 'editTrackButton', 'backstageButton',
   'trackEditDialog', 'trackCoverPreview', 'chooseCoverButton', 'clearCoverButton',
-  'trackTitleInput', 'trackSubmitterInput', 'saveTrackMetadataButton',
+  'trackTitleInput', 'trackSubmitterInput', 'trackDescriptionInput',
+  'trackDescriptionVisibleInput', 'saveTrackMetadataButton',
 ].map((id) => [id, document.getElementById(id)]));
 
 function formatTime(value) {
@@ -52,6 +54,28 @@ function currentTrack() {
 
 function trackForRound(roundId) {
   return state.tracks.find((track) => track.roundId === roundId) || null;
+}
+
+function publishBackstageState() {
+  api.publishBackstageState({
+    currentTrackId: currentTrack()?.id || '',
+    tracks: state.tracks.map((track) => ({
+      id: track.id,
+      number: track.roundId,
+      title: track.title,
+      type: track.type,
+      description: track.description || '',
+      descriptionVisible: Boolean(track.descriptionVisible),
+    })),
+  }).catch((error) => console.error('backstage sync failed', error));
+}
+
+function renderTrackDescription() {
+  const track = currentTrack();
+  const visible = Boolean(track && track.type !== 'video' && track.descriptionVisible && track.description?.trim());
+  elements.trackDescriptionCard.hidden = !visible;
+  elements.trackDescriptionText.textContent = visible ? track.description : '';
+  elements.programFrame.classList.toggle('has-description', visible);
 }
 
 function showToast(message, type = 'info', duration = 3600) {
@@ -92,6 +116,7 @@ function renderPlaylist() {
     empty.className = 'empty-playlist';
     empty.innerHTML = '<div class="drop-icon">⇩</div><strong>把媒体文件拖到这里</strong><span>支持 MP3 / FLAC / WAV / MP4 / WEBM</span>';
     elements.playlist.appendChild(empty);
+    publishBackstageState();
     return;
   }
 
@@ -120,6 +145,7 @@ function renderPlaylist() {
     item.addEventListener('click', () => loadTrack(index, true));
     elements.playlist.appendChild(item);
   });
+  publishBackstageState();
 }
 
 async function addTracks(items) {
@@ -127,6 +153,8 @@ async function addTracks(items) {
   const failed = items.filter((item) => item?.error);
   for (const item of valid) {
     item.roundId = String(state.tracks.length + 1).padStart(2, '0');
+    item.description = String(item.description || '').slice(0, 500);
+    item.descriptionVisible = Boolean(item.descriptionVisible);
     state.tracks.push(item);
     archive({
       type: 'track_added',
@@ -158,7 +186,7 @@ async function loadTrack(index, autoplay = false) {
   elements.mediaElement.load();
   elements.programFrame.classList.remove('no-media');
   elements.programFrame.classList.toggle('video-mode', track.type === 'video');
-  elements.roundNumber.textContent = track.roundId;
+  elements.trackNumber.textContent = track.roundId;
   elements.trackTitle.textContent = track.title;
   elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
   elements.scoreHint.textContent = `评分：#${track.roundId} 8.5`;
@@ -166,6 +194,7 @@ async function loadTrack(index, autoplay = false) {
   elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
   elements.coverImage.src = track.coverDataUrl || '';
   elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+  renderTrackDescription();
   elements.durationTime.textContent = track.duration ? formatTime(track.duration) : '00:00';
   elements.currentTime.textContent = '00:00';
   elements.progressInput.value = '0';
@@ -241,6 +270,8 @@ function openTrackEditor() {
   state.pendingCoverPath = track.coverPath || '';
   elements.trackTitleInput.value = track.title || '';
   elements.trackSubmitterInput.value = track.submitter || track.artist || '';
+  elements.trackDescriptionInput.value = track.description || '';
+  elements.trackDescriptionVisibleInput.checked = Boolean(track.descriptionVisible);
   renderTrackCoverPreview(state.pendingCoverDataUrl);
   elements.trackEditDialog.showModal();
 }
@@ -271,11 +302,14 @@ function saveTrackMetadata() {
   track.submitter = elements.trackSubmitterInput.value.trim();
   track.coverDataUrl = state.pendingCoverDataUrl;
   track.coverPath = state.pendingCoverPath;
+  track.description = elements.trackDescriptionInput.value.trim();
+  track.descriptionVisible = elements.trackDescriptionVisibleInput.checked;
   elements.trackTitle.textContent = track.title;
   elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
   elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
   elements.coverImage.src = track.coverDataUrl || '';
   elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+  renderTrackDescription();
   renderPlaylist();
   renderComments();
   archive({
@@ -284,9 +318,30 @@ function saveTrackMetadata() {
     trackTitle: track.title,
     submitter: track.submitter,
     coverPath: track.coverPath,
+    description: track.description,
+    descriptionVisible: track.descriptionVisible,
   });
   elements.trackEditDialog.close();
   showToast('曲目信息已更新', 'success');
+}
+
+function applyBackstageUpdate(update) {
+  const track = state.tracks.find((item) => item.id === update.id);
+  if (!track) return;
+  const previousDescription = track.description || '';
+  const previousVisible = Boolean(track.descriptionVisible);
+  if (typeof update.description === 'string') track.description = update.description.trim().slice(0, 500);
+  if (typeof update.descriptionVisible === 'boolean') track.descriptionVisible = update.descriptionVisible;
+  if (track.description === previousDescription && track.descriptionVisible === previousVisible) return;
+  if (track.id === currentTrack()?.id) renderTrackDescription();
+  publishBackstageState();
+  archive({
+    type: 'track_description_updated',
+    roundId: track.roundId,
+    trackTitle: track.title,
+    description: track.description,
+    descriptionVisible: track.descriptionVisible,
+  });
 }
 
 function addCommentToOutput(entry) {
@@ -328,7 +383,7 @@ function renderComments() {
     const name = document.createElement('strong');
     name.textContent = entry.uname || '匿名观众';
     const content = document.createElement('p');
-    content.textContent = entry.kind === 'score' ? `为本轮打出 ${entry.score.toFixed(1)} 分` : entry.comment;
+    content.textContent = entry.kind === 'score' ? `为本曲目打出 ${entry.score.toFixed(1)} 分` : entry.comment;
     copy.append(name, content);
     item.append(avatar, copy);
     elements.commentStream.appendChild(item);
@@ -383,7 +438,7 @@ function processDanmaku(data, source = 'live') {
 
   const targetTrack = trackForRound(parsed.roundId);
   if (!targetTrack) {
-    if (source === 'mock') showToast(`找不到第 ${parsed.roundId} 轮`, 'error');
+    if (source === 'mock') showToast(`找不到编号 ${parsed.roundId} 的曲目`, 'error');
     return;
   }
 
@@ -520,6 +575,7 @@ async function enterProgramMode() {
   } catch {
     // Electron window capture still works without OS fullscreen.
   }
+  api.openBackstage().catch((error) => console.error('open backstage failed', error));
 }
 
 function leaveProgramMode() {
@@ -645,6 +701,9 @@ function bindEvents() {
     catch (error) { showToast(`导入失败：${error.message}`, 'error'); }
   });
   elements.editTrackButton.addEventListener('click', openTrackEditor);
+  elements.backstageButton.addEventListener('click', () => {
+    api.openBackstage().catch((error) => showToast(`后台窗口无法打开：${error.message}`, 'error'));
+  });
   elements.chooseCoverButton.addEventListener('click', chooseTrackCover);
   elements.clearCoverButton.addEventListener('click', () => {
     state.pendingCoverDataUrl = '';
@@ -681,6 +740,10 @@ function bindEvents() {
     if (!document.body.classList.contains('program-mode')) enterProgramMode();
   });
   document.addEventListener('keydown', (event) => {
+    if (event.ctrlKey && event.shiftKey && event.code === 'KeyD') {
+      event.preventDefault();
+      api.openBackstage().catch((error) => console.error('open backstage failed', error));
+    }
     if (event.key === 'Escape' && document.body.classList.contains('program-mode')) leaveProgramMode();
     if (event.code === 'Space' && !['INPUT', 'BUTTON'].includes(document.activeElement?.tagName)) {
       event.preventDefault();
@@ -692,6 +755,7 @@ function bindEvents() {
   });
 
   api.onLiveState((payload) => setConnectionState(payload.status, payload.message));
+  api.onBackstageUpdate(applyBackstageUpdate);
   api.onDiagnostic((payload) => showToast(payload.message, payload.level === 'error' ? 'error' : 'info', 6000));
   api.onLiveMessage((payload) => {
     if (payload.cmd === 'LIVE_OPEN_PLATFORM_DM' && payload.data) processDanmaku(payload.data, 'live');
@@ -724,6 +788,8 @@ async function initialize() {
       id: 'qa-track', path: 'qa-demo.wav', url: URL.createObjectURL(new Blob([silentWav], { type: 'audio/wav' })),
       type: qaVideo ? 'video' : 'audio', title: qaVideo ? 'Midnight Session' : 'Night Signal', artist: 'The Afterglow', album: 'QA Demo', duration: 1,
       submitter: '凌晨四点投稿',
+      description: '一首从城市夜色里长出来的歌。留意后半段逐层叠起的低频与合成器。',
+      descriptionVisible: !qaVideo,
       coverDataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
       posterDataUrl: qaVideo ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><defs><linearGradient id="v" x2="1" y2="1"><stop stop-color="#17204d"/><stop offset=".52" stop-color="#60305c"/><stop offset="1" stop-color="#df6c59"/></linearGradient></defs><rect width="1600" height="900" fill="url(#v)"/><circle cx="1220" cy="230" r="130" fill="#ffd98a" opacity=".9"/><path d="M0 690L270 470 500 650 780 340 1120 720 1400 500 1600 650V900H0Z" fill="#10131e"/><text x="90" y="120" font-family="sans-serif" font-size="36" fill="white" opacity=".7">MIDNIGHT SESSION</text></svg>`)}` : '',
     }]);
