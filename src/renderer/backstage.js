@@ -19,6 +19,7 @@ let snapshot = { currentTrackId: '', tracks: [], playback: {}, connection: {}, s
 let selectedId = '';
 let dirty = false;
 let pendingCover = null;
+let editRevision = 0;
 let playlistSignature = '';
 let dragDepth = 0;
 
@@ -168,6 +169,9 @@ function render(snapshotNext) {
 async function saveMetadata() {
   const track = selectedTrack();
   if (!track) return;
+  const selectionAtSave = selectedId;
+  const revisionAtSave = editRevision;
+  const coverAtSave = pendingCover;
   const title = elements.titleInput.value.trim();
   if (!title) {
     setStatus('曲目名称不能为空', true);
@@ -181,22 +185,29 @@ async function saveMetadata() {
     description: elements.descriptionInput.value.trim(),
     descriptionVisible: elements.visibleInput.checked,
   };
-  if (pendingCover) {
-    update.coverDataUrl = pendingCover.dataUrl;
-    update.coverPath = pendingCover.path;
+  if (coverAtSave) {
+    update.coverDataUrl = coverAtSave.dataUrl;
+    update.coverPath = coverAtSave.path;
   }
   try {
     await api.updateTrack(update);
-    Object.assign(track, {
+    const savedTrack = snapshot.tracks.find((item) => item.id === update.id);
+    if (savedTrack && editRevision === revisionAtSave) Object.assign(savedTrack, {
       title: update.title,
       submitter: update.submitter,
       description: update.description,
       descriptionVisible: update.descriptionVisible,
-      ...(pendingCover ? { hasCover: Boolean(pendingCover.dataUrl), coverPath: pendingCover.path } : {}),
+      ...(coverAtSave ? { hasCover: Boolean(coverAtSave.dataUrl), coverPath: coverAtSave.path } : {}),
     });
-    dirty = false;
-    pendingCover = null;
-    setStatus('曲目信息已应用');
+    if (selectedId === selectionAtSave && editRevision === revisionAtSave) {
+      dirty = false;
+      pendingCover = null;
+      setStatus('曲目信息已应用');
+    } else if (dirty) {
+      setStatus('先前修改已保存，当前更改尚未保存');
+    } else {
+      setStatus('曲目信息已应用');
+    }
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -313,20 +324,28 @@ elements.trackSelect.addEventListener('change', () => {
     return;
   }
   selectedId = elements.trackSelect.value;
+  editRevision += 1;
   dirty = false;
   renderSelected(true);
   setStatus('');
 });
 for (const id of ['titleInput', 'submitterInput', 'descriptionInput']) {
   elements[id].addEventListener('input', () => {
+    editRevision += 1;
     dirty = true;
     setStatus('曲目信息尚未保存');
   });
 }
 elements.chooseCoverButton.addEventListener('click', async () => {
   try {
+    const selectionAtOpen = selectedId;
     const selected = await api.selectCover();
     if (!selected) return;
+    if (selectedId !== selectionAtOpen) {
+      setStatus('选择封面期间切换了曲目，请重新选择封面', true);
+      return;
+    }
+    editRevision += 1;
     pendingCover = selected;
     dirty = true;
     elements.coverState.textContent = `待保存：${selected.path.split(/[\\/]/).pop()}`;
@@ -336,12 +355,17 @@ elements.chooseCoverButton.addEventListener('click', async () => {
   }
 });
 elements.clearCoverButton.addEventListener('click', () => {
+  editRevision += 1;
   pendingCover = { path: '', dataUrl: '' };
   dirty = true;
   elements.coverState.textContent = '保存后移除封面';
   setStatus('封面更改尚未保存');
 });
-elements.visibleInput.addEventListener('change', saveMetadata);
+elements.visibleInput.addEventListener('change', () => {
+  editRevision += 1;
+  dirty = true;
+  saveMetadata();
+});
 elements.saveButton.addEventListener('click', saveMetadata);
 elements.sendMockButton.addEventListener('click', () => {
   const message = elements.mockMessageInput.value.trim();

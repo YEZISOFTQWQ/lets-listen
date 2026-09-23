@@ -567,6 +567,47 @@ function createWindow() {
             || metadata.playlistTitle !== '后台更新的曲名') {
             throw new Error(`后台曲目信息未同步: ${JSON.stringify(metadata)}`);
           }
+          const pendingEdit = await backstageWindow.webContents.executeJavaScript(`(async () => {
+            const input = document.getElementById('descriptionInput');
+            const original = input.value;
+            input.value = '第一版简介';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            const saving = saveMetadata();
+            input.value = '保存期间继续输入的简介';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await saving;
+            render(await window.backstageApi.getState());
+            const result = { draft: input.value, dirty, original };
+            input.value = original;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await saveMetadata();
+            return result;
+          })()`);
+          if (!pendingEdit.dirty || pendingEdit.draft !== '保存期间继续输入的简介') {
+            throw new Error(`保存期间继续编辑的简介丢失：${JSON.stringify(pendingEdit)}`);
+          }
+          const rapidSaves = await backstageWindow.webContents.executeJavaScript(`(async () => {
+            const input = document.getElementById('descriptionInput');
+            input.value = '快速保存第一版';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            const first = saveMetadata();
+            input.value = '快速保存第二版';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            const second = saveMetadata();
+            await Promise.all([first, second]);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            render(await window.backstageApi.getState());
+            const result = { draft: input.value, dirty,
+              saved: snapshot.tracks.find((track) => track.id === 'qa-track')?.description };
+            input.value = '后台实时修改的歌曲简介';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await saveMetadata();
+            return result;
+          })()`);
+          if (rapidSaves.dirty || rapidSaves.draft !== '快速保存第二版'
+            || rapidSaves.saved !== '快速保存第二版') {
+            throw new Error(`连续保存没有保留最后一版简介：${JSON.stringify(rapidSaves)}`);
+          }
           const unsavedSwitch = await backstageWindow.webContents.executeJavaScript(`(() => {
             const title = document.getElementById('titleInput');
             const select = document.getElementById('trackSelect');
