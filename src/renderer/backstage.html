@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>lets-listen · 直播后台</title>
+  <link rel="stylesheet" href="backstage.css">
+</head>
+<body>
+  <main>
+    <header>
+      <span class="eyebrow">LETS-LISTEN · BACKSTAGE</span>
+      <h1>直播后台</h1>
+      <p>在这里操作播放和互动；OBS 只需采集主节目窗口。</p>
+    </header>
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>播放队列 <span id="trackCount">0 首</span></h2>
+        <div class="button-group">
+          <button id="importButton" class="primary" type="button">＋ 导入音频 / 视频</button>
+          <button id="exportButton" type="button">导出存档</button>
+        </div>
+      </div>
+      <div id="playlist" class="playlist"><p>请导入音频或视频文件</p></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>播放控制</h2>
+        <button id="exitProgramButton" type="button">退出节目模式</button>
+      </div>
+      <div class="transport">
+        <button id="previousButton" type="button" aria-label="上一首">‹</button>
+        <button id="playButton" class="primary" type="button" aria-label="播放或暂停">▶</button>
+        <button id="nextButton" type="button" aria-label="下一首">›</button>
+        <span id="playingLabel">尚未选择曲目</span>
+      </div>
+      <div class="slider-row">
+        <span id="currentTime">00:00</span>
+        <input id="progressInput" type="range" min="0" max="1000" value="0" aria-label="播放进度">
+        <span id="durationTime">00:00</span>
+      </div>
+      <label class="slider-row named-slider">
+        <span>音量</span>
+        <input id="volumeInput" type="range" min="0" max="1" step="0.01" value="0.85">
+        <output id="volumeValue">85%</output>
+      </label>
+      <label class="slider-row named-slider">
+        <span>评论底色</span>
+        <input id="commentOpacityInput" type="range" min="0" max="100" step="1" value="72">
+        <output id="commentOpacityValue">72%</output>
+      </label>
+    </section>
+    <section class="panel">
+      <h2>曲目信息</h2>
+      <label class="field">
+        <span>选择要编辑的曲目</span>
+        <select id="trackSelect" disabled><option>暂无曲目</option></select>
+      </label>
+      <div id="currentIndicator" class="hint">请先导入音频或视频</div>
+      <label class="field">
+        <span>曲目名称</span>
+        <input id="titleInput" maxlength="120" disabled>
+      </label>
+      <label class="field">
+        <span>投稿人名称</span>
+        <input id="submitterInput" maxlength="80" disabled>
+      </label>
+      <div class="cover-row">
+        <span id="coverState">暂无封面</span>
+        <div class="button-group">
+          <button id="chooseCoverButton" type="button" disabled>选择封面</button>
+          <button id="clearCoverButton" type="button" disabled>移除封面</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>歌曲简介</span>
+        <textarea id="descriptionInput" maxlength="500" rows="5" placeholder="输入面向直播观众的歌曲介绍" disabled></textarea>
+      </label>
+      <div class="setting-row">
+        <label>
+          <input id="visibleInput" type="checkbox" disabled>
+          <span>在节目画面展示简介</span>
+        </label>
+        <span id="videoNotice"></span>
+      </div>
+      <button id="saveButton" class="primary wide" type="button" disabled>保存曲目信息</button>
+    </section>
+    <section class="panel">
+      <h2>模拟弹幕</h2>
+      <div class="mock-row">
+        <label class="field"><span>测试昵称</span><input id="mockNameInput" value="测试观众" maxlength="20"></label>
+        <label class="field"><span>弹幕内容</span><input id="mockMessageInput" placeholder="#01 8.5 或 #01评 你的观点"></label>
+        <button id="sendMockButton" class="primary" type="button">发送</button>
+      </div>
+      <label class="setting-row check-only">
+        <input id="unparsedInput" type="checkbox" checked>
+        <span>普通弹幕作为评论</span>
+      </label>
+    </section>
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>内置推流</h2>
+        <span id="streamStatus" class="hint">未推流</span>
+      </div>
+      <p class="stream-hint">直接采集主节目窗口和本软件播放的音频；后台窗口不会进入画面。先在主窗口进入节目模式，再开始推流。没有串流密钥也可以录制 10 秒测试录像。</p>
+      <label class="field">
+        <span>FFmpeg 路径（已加入 PATH 时可留空）</span>
+        <input id="ffmpegPathInput" placeholder="自动查找 FFmpeg；也可填写 ffmpeg.exe 的完整路径">
+      </label>
+      <div id="ffmpegStatus" class="hint">正在检测 FFmpeg…</div>
+      <label class="field">
+        <span>输出画质</span>
+        <select id="streamQualityInput"><option value="720p">720p · 30 帧</option><option value="1080p">1080p · 30 帧</option></select>
+      </label>
+      <label class="field">
+        <span>B站推流服务器地址</span>
+        <input id="streamServerInput" placeholder="rtmp://…" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>串流密钥（仅本次使用，不保存）</span>
+        <input id="streamKeyInput" type="password" placeholder="拿到密钥后再填写" autocomplete="off">
+      </label>
+      <div class="button-group stream-actions">
+        <button id="streamTestButton" type="button">录制 10 秒测试</button>
+        <button id="streamStartButton" class="primary" type="button">开始推流</button>
+        <button id="streamStopButton" type="button" disabled>停止</button>
+      </div>
+    </section>
+    <details class="panel">
+      <summary>B站直播连接</summary>
+      <div id="connectionStatus" class="hint">模拟弹幕模式</div>
+      <label class="field"><span>项目 App ID</span><input id="appIdInput" inputmode="numeric"></label>
+      <label class="field"><span>Access Key</span><input id="accessKeyInput" autocomplete="off"></label>
+      <label class="field"><span>Access Secret</span><input id="accessSecretInput" type="password" autocomplete="new-password" placeholder="留空沿用已保存密钥"></label>
+      <div id="secretState" class="hint">尚未保存密钥</div>
+      <label class="field"><span>本场主播身份码 Code</span><input id="identityCodeInput" type="password" autocomplete="off"></label>
+      <div class="button-group live-actions">
+        <button id="saveConfigButton" type="button">保存配置</button>
+        <button id="connectButton" class="primary" type="button">连接直播间</button>
+        <button id="disconnectButton" type="button">断开连接</button>
+      </div>
+    </details>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script src="backstage.js"></script>
+</body>
+</html>

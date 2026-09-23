@@ -17,8 +17,8 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test",
-    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/lib/bili-protocol.cjs && node --check src/lib/bilibili-client.cjs && node --check src/lib/archive-store.cjs && node --check src/renderer/command-parser.js && node --check src/renderer/app.js",
-    "dist": "electron-builder --win portable"
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/backstage-preload.cjs && node --check src/lib/bili-protocol.cjs && node --check src/lib/bilibili-client.cjs && node --check src/lib/archive-store.cjs && node --check src/lib/stream-controller.cjs && node --check src/renderer/command-parser.js && node --check src/renderer/app.js && node --check src/renderer/backstage.js",
+    "dist": "electron-builder --win dir"
   },
   "dependencies": {
     "music-metadata": "^11.8.3"

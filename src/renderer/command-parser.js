@@ -25,7 +25,7 @@
     const currentRound = normalizeRound(options.currentRound);
     let match;
 
-    match = text.match(/^#?\s*(?:P|曲)?\s*(\d{1,3})\s*(?:评分|打分|分|score|s)?\s*[: ]?\s*(\d{1,2}(?:\.\d)?)\s*分?$/i);
+    match = text.match(/^#?\s*(?:TRACK|曲目|P|曲)?\s*(\d{1,3})\s*(?:评分|打分|分|score|s)?\s*[: ]?\s*(\d{1,2}(?:\.\d)?)\s*分?$/i);
     if (match) {
       const score = Number(match[2]);
       if (score < 0 || score > 10) {
@@ -44,7 +44,7 @@
       return { type: 'score', roundId: currentRound, score, raw: text };
     }
 
-    match = text.match(/^#?\s*(?:P|曲)?\s*(\d{1,3})\s*(?:评论|点评|评|comment|c)\s*[: ]?\s*(.+)$/i);
+    match = text.match(/^#?\s*(?:TRACK|曲目|P|曲)?\s*(\d{1,3})\s*(?:评论|点评|评|comment|c)\s*[: ]?\s*(.+)$/i);
     if (match) {
       return { type: 'comment', roundId: normalizeRound(match[1]), comment: match[2].trim(), raw: text };
     }
@@ -55,7 +55,7 @@
       return { type: 'comment', roundId: currentRound, comment: match[1].trim(), raw: text };
     }
 
-    match = text.match(/^#?\s*(?:P|曲)?\s*(\d{1,3})\s+(.+)$/i);
+    match = text.match(/^#?\s*(?:TRACK|曲目|P|曲)?\s*(\d{1,3})\s+(.+)$/i);
     if (match) {
       return { type: 'comment', roundId: normalizeRound(match[1]), comment: match[2].trim(), raw: text };
     }

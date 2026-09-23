@@ -16,14 +16,17 @@ test('archives JSONL events and exports comment/score CSV', async (t) => {
     type: 'comment', roundId: '01', trackTitle: 'Song', openId: 'u1', uname: 'Alice', comment: '好听', msgId: 'm1',
   });
   await store.append(session.sessionId, {
-    type: 'score', roundId: '01', trackTitle: 'Song', openId: 'u1', uname: 'Alice', score: 8.5, msgId: 'm2',
+    type: 'score', trackId: '01', trackTitle: 'Song', openId: 'u1', uname: 'Alice', score: 8.5, msgId: 'm2',
   });
   const destination = path.join(root, 'export.csv');
   const result = await store.exportCsv(session.sessionId, destination);
   const csv = await fs.readFile(destination, 'utf8');
   assert.equal(result.count, 2);
+  const lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
+  assert.equal(lines[0].split(',')[2], 'track_id');
+  assert.match(lines[1], /"01"/);
+  assert.match(lines[2], /"01"/);
   assert.match(csv, /Alice/);
   assert.match(csv, /8\.5/);
   assert.match(csv, /好听/);
 });
-

@@ -1,0 +1,64 @@
+:root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 460px; background: #0c0e13; color: #f0eee7; }
+main { max-width: 760px; margin: 0 auto; padding: 20px 22px 32px; }
+.eyebrow { color: #d8ff3e; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+h1 { margin: 7px 0 4px; font-size: 23px; }
+header p { margin: 0 0 18px; color: #a1a4b0; font-size: 11px; line-height: 1.6; }
+.panel { margin: 12px 0; padding: 16px; border: 1px solid #292c34; border-radius: 14px; background: #11141b; }
+.panel-heading, .button-group, .transport, .slider-row, .cover-row, .setting-row, .mock-row { display: flex; align-items: center; gap: 9px; }
+.panel-heading { justify-content: space-between; flex-wrap: wrap; }
+h2, summary { margin: 0 0 12px; font-size: 14px; font-weight: 800; }
+.panel-heading h2 { margin-bottom: 0; }
+h2 span { margin-left: 5px; color: #a1a4b0; font-size: 11px; font-weight: 400; }
+.button-group { flex-wrap: wrap; }
+button { min-height: 34px; padding: 0 12px; border: 1px solid #3a3d47; border-radius: 8px; background: #1b1e26; color: #f0eee7; font: 700 11px "Segoe UI", "Microsoft YaHei", sans-serif; cursor: pointer; }
+button:hover { border-color: #747985; }
+button.primary { border-color: #d8ff3e; background: #d8ff3e; color: #11130e; }
+button.primary:hover { background: #e5ff72; }
+button:disabled { opacity: .42; cursor: default; }
+button.wide { width: 100%; margin-top: 16px; }
+.playlist { max-height: 176px; margin-top: 12px; overflow-y: auto; }
+.playlist > p { margin: 0; padding: 22px 0; color: #a1a4b0; text-align: center; font-size: 11px; }
+.playlist-item { display: flex; align-items: center; gap: 10px; width: 100%; margin: 4px 0; padding: 8px 10px; text-align: left; }
+.playlist-item.active { border-color: #d8ff3e; background: #252b20; }
+.playlist-number { width: 24px; color: #d8ff3e; font: 800 11px monospace; }
+.playlist-copy { flex: 1; min-width: 0; }
+.playlist-copy strong, .playlist-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-copy small { margin-top: 2px; color: #a1a4b0; font-weight: 400; }
+.playlist-duration { color: #a1a4b0; font: 10px monospace; }
+.transport { margin: 8px 0 14px; }
+.transport button { width: 38px; height: 38px; padding: 0; font-size: 22px; }
+.transport button.primary { font-size: 15px; }
+#playingLabel { min-width: 0; margin-left: 4px; overflow: hidden; color: #cdd0d7; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.slider-row { margin-top: 12px; }
+.slider-row > span, .slider-row output { min-width: 42px; color: #a1a4b0; font: 10px monospace; }
+.named-slider > span { min-width: 62px; font: 11px "Segoe UI", "Microsoft YaHei", sans-serif; }
+input[type="range"] { flex: 1; min-width: 0; accent-color: #d8ff3e; }
+.field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.field > span { color: #c9cbd1; font-size: 11px; font-weight: 700; }
+select, textarea, input:not([type="range"]):not([type="checkbox"]) { width: 100%; padding: 9px 11px; border: 1px solid #33363f; border-radius: 8px; outline: none; background: #171a21; color: #f0eee7; font: 12px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
+select, input:not([type="range"]):not([type="checkbox"]) { min-height: 36px; }
+textarea { min-height: 92px; resize: vertical; }
+select:focus, textarea:focus, input:focus { border-color: #d8ff3e; }
+select:disabled, textarea:disabled, input:disabled { opacity: .5; }
+.hint { margin-top: 8px; color: #a1a4b0; font-size: 10px; line-height: 1.5; }
+.cover-row { justify-content: space-between; flex-wrap: wrap; margin-top: 14px; }
+#coverState { max-width: 100%; overflow: hidden; color: #a1a4b0; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.setting-row { justify-content: space-between; margin-top: 15px; }
+.setting-row label, .check-only { display: flex; align-items: center; gap: 9px; color: #f0eee7; font-size: 11px; cursor: pointer; }
+.setting-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #d8ff3e; }
+#videoNotice { color: #ffac9e; font-size: 10px; }
+.mock-row { align-items: end; flex-wrap: wrap; }
+.mock-row .field:first-child { width: 115px; }
+.mock-row .field:nth-child(2) { flex: 1; min-width: 180px; }
+.mock-row button { margin-bottom: 1px; }
+details summary { margin-bottom: 0; cursor: pointer; }
+details[open] summary { margin-bottom: 15px; }
+.live-actions { margin-top: 16px; }
+#status { position: sticky; bottom: 0; min-height: 30px; margin: 0; padding: 8px 0; background: #0c0e13; color: #a1a4b0; font-size: 11px; }
+#status.error { color: #ff8e7c; }
+body.dragging::after { position: fixed; inset: 10px; display: grid; place-items: center; border: 2px dashed #d8ff3e; border-radius: 14px; background: rgba(8,9,13,.94); color: #d8ff3e; content: "释放以导入音频或视频"; font-size: 22px; font-weight: 800; pointer-events: none; }
+.stream-hint { color: #aeb2bd; font-size: 12px; line-height: 1.6; }
+.stream-actions { margin-top: 14px; }
+#streamStatus { max-width: 60%; text-align: right; overflow-wrap: anywhere; }

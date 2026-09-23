@@ -13,9 +13,16 @@ const state = {
   sessionId: null,
   sessionPath: '',
   connected: false,
+  connectionStatus: 'disconnected',
+  connectionMessage: '模拟弹幕模式',
+  lastProgressPublish: 0,
   audioContext: null,
   analyser: null,
   mediaSource: null,
+  captureDestination: null,
+  streamCapture: null,
+  pendingStreamId: null,
+  cancelledStreamCaptures: new Set(),
   dragDepth: 0,
   pendingCoverDataUrl: '',
   pendingCoverPath: '',
@@ -23,16 +30,18 @@ const state = {
 
 const elements = Object.fromEntries([
   'importButton', 'trackCount', 'playlist', 'settingsButton', 'connectionDot', 'connectionText',
-  'exportButton', 'programModeButton', 'programFrame', 'mediaElement', 'roundNumber', 'coverFrame',
+  'exportButton', 'programModeButton', 'programFrame', 'mediaElement', 'trackNumber', 'coverFrame',
   'coverImage', 'trackTitle', 'trackArtist', 'visualizer', 'averageScore', 'scoreCount', 'scoreMeter',
+  'trackDescriptionCard', 'trackDescriptionText',
   'commentStream', 'scoreHint', 'commentHint', 'previousButton', 'playButton', 'nextButton',
   'currentTime', 'progressInput', 'durationTime', 'volumeInput', 'mockNameInput', 'mockMessageInput',
   'commentOpacityInput', 'commentOpacityValue',
   'sendMockButton', 'unparsedCommentInput', 'dropOverlay', 'settingsDialog', 'appIdInput',
   'accessKeyInput', 'accessSecretInput', 'secretState', 'identityCodeInput', 'dialogStatus',
-  'saveConfigButton', 'disconnectButton', 'connectButton', 'toastContainer', 'editTrackButton',
+  'saveConfigButton', 'disconnectButton', 'connectButton', 'toastContainer', 'editTrackButton', 'backstageButton',
   'trackEditDialog', 'trackCoverPreview', 'chooseCoverButton', 'clearCoverButton',
-  'trackTitleInput', 'trackSubmitterInput', 'saveTrackMetadataButton',
+  'trackTitleInput', 'trackSubmitterInput', 'trackDescriptionInput',
+  'trackDescriptionVisibleInput', 'saveTrackMetadataButton',
 ].map((id) => [id, document.getElementById(id)]));
 
 function formatTime(value) {
@@ -54,28 +63,73 @@ function trackForRound(roundId) {
   return state.tracks.find((track) => track.roundId === roundId) || null;
 }
 
+function publishBackstageState() {
+  api.publishBackstageState({
+    currentTrackId: currentTrack()?.id || '',
+    sessionId: state.sessionId || '',
+    tracks: state.tracks.map((track) => ({
+      id: track.id,
+      number: track.roundId,
+      title: track.title,
+      submitter: track.submitter || track.artist || '',
+      hasCover: Boolean(track.coverDataUrl),
+      coverPath: track.coverPath || '',
+      duration: track.duration || 0,
+      type: track.type,
+      description: track.description || '',
+      descriptionVisible: Boolean(track.descriptionVisible),
+    })),
+    playback: {
+      currentTime: elements.mediaElement.currentTime || 0,
+      duration: Number.isFinite(elements.mediaElement.duration) ? elements.mediaElement.duration : currentTrack()?.duration || 0,
+      paused: elements.mediaElement.paused,
+      volume: elements.mediaElement.volume,
+      commentOpacity: Number(elements.commentOpacityInput.value),
+      programMode: document.body.classList.contains('program-mode'),
+      unparsedAsComment: elements.unparsedCommentInput.checked,
+    },
+    connection: { status: state.connectionStatus, message: state.connectionMessage },
+  }).catch((error) => console.error('backstage sync failed', error));
+}
+
+function renderTrackDescription() {
+  const track = currentTrack();
+  const visible = Boolean(track && track.type !== 'video' && track.descriptionVisible && track.description?.trim());
+  elements.trackDescriptionCard.hidden = !visible;
+  elements.trackDescriptionText.textContent = visible ? track.description : '';
+  elements.programFrame.classList.toggle('has-description', visible);
+}
+
 function showToast(message, type = 'info', duration = 3600) {
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
   toast.textContent = message;
   elements.toastContainer.appendChild(toast);
   setTimeout(() => toast.remove(), duration);
+  api.sendBackstageFeedback(message, type).catch((error) => console.error('backstage feedback failed', error));
 }
 
 async function ensureArchive() {
   if (!state.sessionPromise) {
-    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 1 });
+    state.sessionPromise = api.startArchive({ app: '品味大战', schemaVersion: 2 });
   }
   const session = await state.sessionPromise;
+  const isNewSession = state.sessionId !== session.sessionId;
   state.sessionId = session.sessionId;
   state.sessionPath = session.filePath;
+  if (isNewSession) publishBackstageState();
   return session;
 }
 
 async function archive(entry) {
   try {
     const session = await ensureArchive();
-    await api.appendArchive(session.sessionId, entry);
+    const record = { ...entry };
+    if (Object.hasOwn(record, 'roundId')) {
+      record.trackId = record.roundId;
+      delete record.roundId;
+    }
+    await api.appendArchive(session.sessionId, record);
   } catch (error) {
     console.error('archive failed', error);
   }
@@ -92,6 +146,7 @@ function renderPlaylist() {
     empty.className = 'empty-playlist';
     empty.innerHTML = '<div class="drop-icon">⇩</div><strong>把媒体文件拖到这里</strong><span>支持 MP3 / FLAC / WAV / MP4 / WEBM</span>';
     elements.playlist.appendChild(empty);
+    publishBackstageState();
     return;
   }
 
@@ -120,6 +175,7 @@ function renderPlaylist() {
     item.addEventListener('click', () => loadTrack(index, true));
     elements.playlist.appendChild(item);
   });
+  publishBackstageState();
 }
 
 async function addTracks(items) {
@@ -127,6 +183,8 @@ async function addTracks(items) {
   const failed = items.filter((item) => item?.error);
   for (const item of valid) {
     item.roundId = String(state.tracks.length + 1).padStart(2, '0');
+    item.description = String(item.description || '').slice(0, 500);
+    item.descriptionVisible = Boolean(item.descriptionVisible);
     state.tracks.push(item);
     archive({
       type: 'track_added',
@@ -158,7 +216,7 @@ async function loadTrack(index, autoplay = false) {
   elements.mediaElement.load();
   elements.programFrame.classList.remove('no-media');
   elements.programFrame.classList.toggle('video-mode', track.type === 'video');
-  elements.roundNumber.textContent = track.roundId;
+  elements.trackNumber.textContent = track.roundId;
   elements.trackTitle.textContent = track.title;
   elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
   elements.scoreHint.textContent = `评分：#${track.roundId} 8.5`;
@@ -166,6 +224,7 @@ async function loadTrack(index, autoplay = false) {
   elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
   elements.coverImage.src = track.coverDataUrl || '';
   elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+  renderTrackDescription();
   elements.durationTime.textContent = track.duration ? formatTime(track.duration) : '00:00';
   elements.currentTime.textContent = '00:00';
   elements.progressInput.value = '0';
@@ -193,6 +252,8 @@ async function ensureAudioGraph() {
     state.mediaSource = state.audioContext.createMediaElementSource(elements.mediaElement);
     state.mediaSource.connect(state.analyser);
     state.analyser.connect(state.audioContext.destination);
+    state.captureDestination = state.audioContext.createMediaStreamDestination();
+    state.mediaSource.connect(state.captureDestination);
   }
   if (state.audioContext.state === 'suspended') await state.audioContext.resume();
 }
@@ -209,6 +270,74 @@ async function togglePlayback() {
   } catch (error) {
     showToast(`播放失败：${error.message}`, 'error');
   }
+}
+
+async function startStreamCapture({ id, mediaSourceId, testSeconds = 0 }) {
+  if (state.streamCapture || state.pendingStreamId) throw new Error('已有画面采集正在运行');
+  state.pendingStreamId = id;
+  let displayStream;
+  try {
+    await ensureAudioGraph();
+    try {
+      if (!mediaSourceId) throw new Error('节目窗口缺少捕获标识');
+      displayStream = await navigator.mediaDevices.getUserMedia({
+        video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: mediaSourceId, maxFrameRate: 30 } },
+        audio: false,
+      });
+    } catch (error) {
+      // Chromium versions differ in support for exact-window getUserMedia constraints.
+      displayStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+    }
+    const videoTrack = displayStream.getVideoTracks()[0];
+    if (state.cancelledStreamCaptures.delete(id)) throw new Error('采集已取消');
+    const audioTrack = state.captureDestination.stream.getAudioTracks()[0];
+    if (!videoTrack || !audioTrack) throw new Error('无法取得节目画面或应用音频');
+    const combined = new MediaStream([videoTrack, audioTrack]);
+    const mimeType = ['video/webm;codecs=vp8,opus', 'video/webm'].find((type) => MediaRecorder.isTypeSupported(type));
+    if (!mimeType) throw new Error('当前 Chromium 不支持 WebM 实时编码');
+    const recorder = new MediaRecorder(combined, {
+      mimeType, videoBitsPerSecond: 4500000, audioBitsPerSecond: 160000,
+    });
+    const capture = { id, recorder, displayStream, pending: Promise.resolve(), timer: null };
+    state.streamCapture = capture;
+    state.pendingStreamId = null;
+    recorder.addEventListener('dataavailable', (event) => {
+      if (!event.data.size) return;
+      capture.pending = capture.pending.then(async () => {
+        api.sendStreamChunk(id, new Uint8Array(await event.data.arrayBuffer()));
+      });
+    });
+    recorder.addEventListener('error', (event) => api.sendStreamCaptureError(id, event.error?.message || '录制器发生错误'));
+    recorder.addEventListener('stop', async () => {
+      clearTimeout(capture.timer);
+      displayStream.getTracks().forEach((track) => track.stop());
+      try {
+        await capture.pending;
+        api.sendStreamCaptureStopped(id);
+      } catch (error) {
+        api.sendStreamCaptureError(id, error.message);
+      }
+      if (state.streamCapture === capture) state.streamCapture = null;
+    });
+    videoTrack.addEventListener('ended', () => stopStreamCapture(id));
+    recorder.start(500);
+    api.sendStreamCaptureReady(id);
+    if (testSeconds) capture.timer = setTimeout(() => stopStreamCapture(id), testSeconds * 1000);
+  } catch (error) {
+    state.pendingStreamId = null;
+    state.cancelledStreamCaptures.delete(id);
+    displayStream?.getTracks().forEach((track) => track.stop());
+    api.sendStreamCaptureError(id, error.message);
+  }
+}
+
+function stopStreamCapture(id) {
+  const capture = state.streamCapture;
+  if (!capture || capture.id !== id) {
+    if (state.pendingStreamId === id) state.cancelledStreamCaptures.add(id);
+    return;
+  }
+  if (capture.recorder.state !== 'inactive') capture.recorder.stop();
 }
 
 function goRelative(offset) {
@@ -241,6 +370,8 @@ function openTrackEditor() {
   state.pendingCoverPath = track.coverPath || '';
   elements.trackTitleInput.value = track.title || '';
   elements.trackSubmitterInput.value = track.submitter || track.artist || '';
+  elements.trackDescriptionInput.value = track.description || '';
+  elements.trackDescriptionVisibleInput.checked = Boolean(track.descriptionVisible);
   renderTrackCoverPreview(state.pendingCoverDataUrl);
   elements.trackEditDialog.showModal();
 }
@@ -271,11 +402,14 @@ function saveTrackMetadata() {
   track.submitter = elements.trackSubmitterInput.value.trim();
   track.coverDataUrl = state.pendingCoverDataUrl;
   track.coverPath = state.pendingCoverPath;
+  track.description = elements.trackDescriptionInput.value.trim();
+  track.descriptionVisible = elements.trackDescriptionVisibleInput.checked;
   elements.trackTitle.textContent = track.title;
   elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
   elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
   elements.coverImage.src = track.coverDataUrl || '';
   elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+  renderTrackDescription();
   renderPlaylist();
   renderComments();
   archive({
@@ -284,9 +418,51 @@ function saveTrackMetadata() {
     trackTitle: track.title,
     submitter: track.submitter,
     coverPath: track.coverPath,
+    description: track.description,
+    descriptionVisible: track.descriptionVisible,
   });
   elements.trackEditDialog.close();
   showToast('曲目信息已更新', 'success');
+}
+
+function applyBackstageUpdate(update) {
+  const track = state.tracks.find((item) => item.id === update.id);
+  if (!track) return;
+  const previousTitle = track.title;
+  const previousSubmitter = track.submitter || '';
+  const previousCover = track.coverDataUrl || '';
+  const previousDescription = track.description || '';
+  const previousVisible = Boolean(track.descriptionVisible);
+  if (typeof update.title === 'string' && update.title.trim()) track.title = update.title.trim().slice(0, 120);
+  if (typeof update.submitter === 'string') track.submitter = update.submitter.trim().slice(0, 80);
+  if (typeof update.coverDataUrl === 'string') {
+    track.coverDataUrl = update.coverDataUrl;
+    track.coverPath = update.coverPath || '';
+  }
+  if (typeof update.description === 'string') track.description = update.description.trim().slice(0, 500);
+  if (typeof update.descriptionVisible === 'boolean') track.descriptionVisible = update.descriptionVisible;
+  const metadataChanged = track.title !== previousTitle
+    || (track.submitter || '') !== previousSubmitter
+    || (track.coverDataUrl || '') !== previousCover;
+  if (!metadataChanged && track.description === previousDescription && track.descriptionVisible === previousVisible) return;
+  if (track.id === currentTrack()?.id) {
+    elements.trackTitle.textContent = track.title;
+    elements.trackArtist.textContent = track.submitter || track.artist || track.album || (track.type === 'video' ? '视频文件' : '未知投稿人');
+    elements.coverFrame.classList.toggle('has-cover', Boolean(track.coverDataUrl));
+    elements.coverImage.src = track.coverDataUrl || '';
+    elements.mediaElement.poster = track.posterDataUrl || track.coverDataUrl || '';
+    renderTrackDescription();
+  }
+  renderPlaylist();
+  archive({
+    type: metadataChanged ? 'track_metadata_updated' : 'track_description_updated',
+    roundId: track.roundId,
+    trackTitle: track.title,
+    submitter: track.submitter || '',
+    coverPath: track.coverPath || '',
+    description: track.description,
+    descriptionVisible: track.descriptionVisible,
+  });
 }
 
 function addCommentToOutput(entry) {
@@ -297,8 +473,7 @@ function addCommentToOutput(entry) {
 
 function renderComments() {
   const roundId = currentTrack()?.roundId;
-  const limit = elements.programFrame.classList.contains('video-mode') ? 6 : 4;
-  const visible = state.comments.filter((item) => item.roundId === roundId).slice(-limit);
+  const visible = state.comments.filter((item) => item.roundId === roundId).slice(-40);
   elements.commentStream.innerHTML = '';
   if (!visible.length) {
     const placeholder = document.createElement('div');
@@ -328,10 +503,15 @@ function renderComments() {
     const name = document.createElement('strong');
     name.textContent = entry.uname || '匿名观众';
     const content = document.createElement('p');
-    content.textContent = entry.kind === 'score' ? `为本轮打出 ${entry.score.toFixed(1)} 分` : entry.comment;
+    content.textContent = entry.kind === 'score' ? `为本曲目打出 ${entry.score.toFixed(1)} 分` : entry.comment;
     copy.append(name, content);
     item.append(avatar, copy);
     elements.commentStream.appendChild(item);
+  }
+  // Keep every row that fits; fullscreen can show more without clipping long comments.
+  while (elements.commentStream.scrollHeight > elements.commentStream.clientHeight
+    && elements.commentStream.children.length > 1) {
+    elements.commentStream.firstElementChild.remove();
   }
 }
 
@@ -383,7 +563,7 @@ function processDanmaku(data, source = 'live') {
 
   const targetTrack = trackForRound(parsed.roundId);
   if (!targetTrack) {
-    if (source === 'mock') showToast(`找不到第 ${parsed.roundId} 轮`, 'error');
+    if (source === 'mock') showToast(`找不到编号 ${parsed.roundId} 的曲目`, 'error');
     return;
   }
 
@@ -422,6 +602,12 @@ function sendMockDanmaku() {
   const message = elements.mockMessageInput.value.trim();
   if (!message) return;
   const name = elements.mockNameInput.value.trim() || '测试观众';
+  emitMockDanmaku(name, message);
+  elements.mockMessageInput.value = '';
+  elements.mockMessageInput.focus();
+}
+
+function emitMockDanmaku(name, message) {
   processDanmaku({
     open_id: `mock-${hashName(name)}`,
     uname: name,
@@ -429,18 +615,19 @@ function sendMockDanmaku() {
     msg_id: crypto.randomUUID(),
     timestamp: Math.floor(Date.now() / 1000),
   }, 'mock');
-  elements.mockMessageInput.value = '';
-  elements.mockMessageInput.focus();
 }
 
 function setConnectionState(status, message) {
   const connected = status === 'connected';
   state.connected = connected;
+  state.connectionStatus = status;
+  state.connectionMessage = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
   elements.connectionDot.className = `status-dot ${connected ? 'connected' : status === 'error' ? 'error' : ''}`;
   elements.connectionText.textContent = message || (connected ? '已连接 B站直播间' : '模拟弹幕模式');
   elements.dialogStatus.textContent = message || '';
   elements.connectButton.disabled = ['starting', 'reconnecting'].includes(status);
   elements.disconnectButton.disabled = !connected && status !== 'reconnecting';
+  publishBackstageState();
 }
 
 async function loadConfig() {
@@ -515,15 +702,20 @@ async function exportArchive() {
 
 async function enterProgramMode() {
   document.body.classList.add('program-mode');
+  renderComments();
+  publishBackstageState();
   try {
     await document.documentElement.requestFullscreen();
   } catch {
     // Electron window capture still works without OS fullscreen.
   }
+  api.openBackstage().catch((error) => console.error('open backstage failed', error));
 }
 
 function leaveProgramMode() {
   document.body.classList.remove('program-mode');
+  renderComments();
+  publishBackstageState();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
 
@@ -533,10 +725,12 @@ function setupMediaEvents() {
   media.addEventListener('play', () => {
     elements.playButton.textContent = 'Ⅱ';
     elements.programFrame.classList.add('playing');
+    publishBackstageState();
   });
   media.addEventListener('pause', () => {
     elements.playButton.textContent = '▶';
     elements.programFrame.classList.remove('playing');
+    publishBackstageState();
   });
   media.addEventListener('loadedmetadata', () => {
     const track = currentTrack();
@@ -548,6 +742,10 @@ function setupMediaEvents() {
     elements.currentTime.textContent = formatTime(media.currentTime);
     const progress = media.duration ? Math.round((media.currentTime / media.duration) * 1000) : 0;
     elements.progressInput.value = String(progress);
+    if (Date.now() - state.lastProgressPublish > 400) {
+      state.lastProgressPublish = Date.now();
+      publishBackstageState();
+    }
   });
   media.addEventListener('ended', () => {
     archive({ type: 'track_completed', roundId: currentTrack()?.roundId, trackTitle: currentTrack()?.title });
@@ -568,6 +766,66 @@ function setCommentOpacity(value, persist = true) {
   document.documentElement.style.setProperty('--comment-panel-blur', `${Math.round(alpha * 14)}px`);
   document.documentElement.style.setProperty('--comment-panel-border-alpha', (alpha * .15).toFixed(3));
   if (persist) localStorage.setItem('commentPanelOpacity', String(percent));
+  publishBackstageState();
+}
+
+async function handleBackstageCommand(command) {
+  const payload = command.payload || {};
+  switch (command.type) {
+    case 'import':
+      if (!Array.isArray(payload.items)) throw new Error('导入列表无效');
+      await addTracks(payload.items);
+      break;
+    case 'select-track': {
+      const index = state.tracks.findIndex((track) => track.id === payload.id);
+      if (index < 0) throw new Error('曲目已不存在');
+      await loadTrack(index, true);
+      break;
+    }
+    case 'play-pause':
+      await togglePlayback();
+      break;
+    case 'previous':
+      goRelative(-1);
+      break;
+    case 'next':
+      goRelative(1);
+      break;
+    case 'seek': {
+      const duration = elements.mediaElement.duration;
+      if (Number.isFinite(duration) && duration > 0) {
+        const progress = Math.max(0, Math.min(1000, Number(payload.progress) || 0));
+        elements.mediaElement.currentTime = duration * progress / 1000;
+        publishBackstageState();
+      }
+      break;
+    }
+    case 'volume': {
+      const volume = Math.max(0, Math.min(1, Number(payload.value) || 0));
+      elements.mediaElement.volume = volume;
+      elements.volumeInput.value = String(volume);
+      publishBackstageState();
+      break;
+    }
+    case 'comment-opacity':
+      setCommentOpacity(payload.value);
+      break;
+    case 'mock-danmaku': {
+      const message = String(payload.message || '').trim();
+      if (!message) throw new Error('请输入模拟弹幕');
+      emitMockDanmaku(String(payload.name || '').trim() || '测试观众', message);
+      break;
+    }
+    case 'unparsed-as-comment':
+      elements.unparsedCommentInput.checked = Boolean(payload.value);
+      publishBackstageState();
+      break;
+    case 'leave-program':
+      leaveProgramMode();
+      break;
+    default:
+      throw new Error('不支持的后台操作');
+  }
 }
 
 function setupVisualizer() {
@@ -645,6 +903,9 @@ function bindEvents() {
     catch (error) { showToast(`导入失败：${error.message}`, 'error'); }
   });
   elements.editTrackButton.addEventListener('click', openTrackEditor);
+  elements.backstageButton.addEventListener('click', () => {
+    api.openBackstage().catch((error) => showToast(`后台窗口无法打开：${error.message}`, 'error'));
+  });
   elements.chooseCoverButton.addEventListener('click', chooseTrackCover);
   elements.clearCoverButton.addEventListener('click', () => {
     state.pendingCoverDataUrl = '';
@@ -662,12 +923,14 @@ function bindEvents() {
   });
   elements.volumeInput.addEventListener('input', () => {
     elements.mediaElement.volume = Number(elements.volumeInput.value);
+    publishBackstageState();
   });
   elements.commentOpacityInput.addEventListener('input', () => setCommentOpacity(elements.commentOpacityInput.value));
   elements.sendMockButton.addEventListener('click', sendMockDanmaku);
   elements.mockMessageInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') sendMockDanmaku();
   });
+  elements.unparsedCommentInput.addEventListener('change', publishBackstageState);
   elements.settingsButton.addEventListener('click', async () => {
     await loadConfig();
     elements.settingsDialog.showModal();
@@ -681,6 +944,10 @@ function bindEvents() {
     if (!document.body.classList.contains('program-mode')) enterProgramMode();
   });
   document.addEventListener('keydown', (event) => {
+    if (event.ctrlKey && event.shiftKey && event.code === 'KeyD') {
+      event.preventDefault();
+      api.openBackstage().catch((error) => console.error('open backstage failed', error));
+    }
     if (event.key === 'Escape' && document.body.classList.contains('program-mode')) leaveProgramMode();
     if (event.code === 'Space' && !['INPUT', 'BUTTON'].includes(document.activeElement?.tagName)) {
       event.preventDefault();
@@ -689,9 +956,20 @@ function bindEvents() {
   });
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) document.body.classList.remove('program-mode');
+    renderComments();
+    publishBackstageState();
   });
+  window.addEventListener('resize', renderComments);
 
   api.onLiveState((payload) => setConnectionState(payload.status, payload.message));
+  api.onBackstageUpdate(applyBackstageUpdate);
+  api.onBackstageCommand((command) => {
+    handleBackstageCommand(command).catch((error) => showToast(error.message, 'error', 6000));
+  });
+  api.onStreamStartCapture((payload) => {
+    startStreamCapture(payload).catch((error) => api.sendStreamCaptureError(payload.id, error.message));
+  });
+  api.onStreamStopCapture((payload) => stopStreamCapture(payload.id));
   api.onDiagnostic((payload) => showToast(payload.message, payload.level === 'error' ? 'error' : 'info', 6000));
   api.onLiveMessage((payload) => {
     if (payload.cmd === 'LIVE_OPEN_PLATFORM_DM' && payload.data) processDanmaku(payload.data, 'live');
@@ -724,6 +1002,8 @@ async function initialize() {
       id: 'qa-track', path: 'qa-demo.wav', url: URL.createObjectURL(new Blob([silentWav], { type: 'audio/wav' })),
       type: qaVideo ? 'video' : 'audio', title: qaVideo ? 'Midnight Session' : 'Night Signal', artist: 'The Afterglow', album: 'QA Demo', duration: 1,
       submitter: '凌晨四点投稿',
+      description: '一首从城市夜色里长出来的歌。留意后半段逐层叠起的低频与合成器。',
+      descriptionVisible: !qaVideo,
       coverDataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
       posterDataUrl: qaVideo ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><defs><linearGradient id="v" x2="1" y2="1"><stop stop-color="#17204d"/><stop offset=".52" stop-color="#60305c"/><stop offset="1" stop-color="#df6c59"/></linearGradient></defs><rect width="1600" height="900" fill="url(#v)"/><circle cx="1220" cy="230" r="130" fill="#ffd98a" opacity=".9"/><path d="M0 690L270 470 500 650 780 340 1120 720 1400 500 1600 650V900H0Z" fill="#10131e"/><text x="90" y="120" font-family="sans-serif" font-size="36" fill="white" opacity=".7">MIDNIGHT SESSION</text></svg>`)}` : '',
     }]);
@@ -735,7 +1015,10 @@ async function initialize() {
     processDanmaku({ open_id: 'qa-1', uname: '银河汽水', msg: '#01 9.7', msg_id: 'qa-score-1-revised' }, 'mock');
     if (qaVideo) setCommentOpacity(46, false);
   }
-  if (query.get('program') === '1') document.body.classList.add('program-mode');
+  if (query.get('program') === '1') {
+    document.body.classList.add('program-mode');
+    publishBackstageState();
+  }
 }
 
 initialize().catch((error) => showToast(`初始化失败：${error.message}`, 'error', 8000));
