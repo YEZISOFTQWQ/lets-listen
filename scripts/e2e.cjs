@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { readCoverFile } = require('../src/lib/media-inspector.cjs');
 
 if (process.platform !== 'win32') throw new Error('此端到端测试需要 Windows 桌面');
 
@@ -115,6 +116,26 @@ async function main() {
       process.stdout.write(`✓ ${format.extension.toUpperCase()} 音频实际播放及频谱\n`);
     } finally {
       await fs.rm(audioPath, { force: true });
+    }
+  }
+  for (const format of [
+    { extension: 'png', codec: 'png', mime: 'png' },
+    { extension: 'jpg', codec: 'mjpeg', mime: 'jpeg' },
+    { extension: 'webp', codec: 'libwebp', mime: 'webp' },
+    { extension: 'gif', codec: 'gif', mime: 'gif' },
+    { extension: 'bmp', codec: 'bmp', mime: 'bmp' },
+  ]) {
+    const coverPath = path.join(os.tmpdir(), `lets-listen-e2e-cover-${randomUUID()}.${format.extension}`);
+    try {
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+        '-i', 'color=c=red:s=32x32', '-frames:v', '1', '-c:v', format.codec, coverPath,
+      ]);
+      const cover = await readCoverFile(coverPath);
+      assert.ok(cover.dataUrl.startsWith(`data:image/${format.mime};base64,`));
+      process.stdout.write(`✓ ${format.extension.toUpperCase()} 封面内容校验\n`);
+    } finally {
+      await fs.rm(coverPath, { force: true });
     }
   }
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream-errors'], '[qa] stream error handling passed');

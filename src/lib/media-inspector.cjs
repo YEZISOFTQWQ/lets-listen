@@ -14,6 +14,23 @@ const COVER_EXTENSIONS = {
   '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
 };
 
+function matchesCoverSignature(data, mimeType) {
+  if (mimeType === 'image/png') {
+    return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+  }
+  if (mimeType === 'image/jpeg') {
+    return data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  }
+  if (mimeType === 'image/webp') {
+    return data.length >= 12 && data.toString('ascii', 0, 4) === 'RIFF'
+      && data.toString('ascii', 8, 12) === 'WEBP';
+  }
+  if (mimeType === 'image/gif') {
+    return data.length >= 6 && ['GIF87a', 'GIF89a'].includes(data.toString('ascii', 0, 6));
+  }
+  return mimeType === 'image/bmp' && data.length >= 14 && data.toString('ascii', 0, 2) === 'BM';
+}
+
 async function readCoverFile(filePath) {
   const mimeType = COVER_EXTENSIONS[path.extname(filePath).toLowerCase()];
   if (!mimeType) throw new Error('不支持的封面图片类型');
@@ -22,6 +39,7 @@ async function readCoverFile(filePath) {
     throw new Error('封面必须是小于 10 MB 的非空图片文件');
   }
   const data = await fs.readFile(filePath);
+  if (!matchesCoverSignature(data, mimeType)) throw new Error('封面图片内容与文件格式不符或已损坏');
   return { path: filePath, dataUrl: `data:${mimeType};base64,${data.toString('base64')}` };
 }
 
