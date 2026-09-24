@@ -117,6 +117,66 @@ test('rejects websocket authentication errors immediately without scheduling rec
   }
 });
 
+test('a late websocket authentication cannot reconnect after the user stops', async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  let socket;
+  class FakeWebSocket {
+    constructor() { this.listeners = new Map(); socket = this; }
+    addEventListener(name, callback) { this.listeners.set(name, callback); }
+    send() {}
+    close() { this.listeners.get('close')?.({ code: 1000 }); }
+    fire(name, event) { this.listeners.get(name)?.(event); }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+  const client = new BilibiliLiveClient({ appId: '123', accessKey: 'key', accessSecret: 'secret' });
+  try {
+    client.gameId = 'game-1';
+    client.websocketInfo = { auth_body: '{}', wss_link: ['wss://example.test'] };
+    client.request = async () => ({});
+    const statuses = [];
+    client.on('state', ({ status }) => statuses.push(status));
+    const connecting = client.openSocket('wss://example.test');
+    await client.stop();
+    socket.fire('open', {});
+    socket.fire('message', { data: encodePacket(Operation.AUTH_REPLY, JSON.stringify({ code: 0 })) });
+    const outcome = await connecting.then(() => 'connected', () => 'canceled');
+    assert.equal(outcome, 'canceled');
+    assert.deepEqual(statuses, ['disconnected']);
+    assert.equal(client.socket, null);
+    assert.equal(client.socketHeartbeat, null);
+    assert.equal(client.reconnectTimer, null);
+  } finally {
+    client.handleInteractionEnd();
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test('stopping during the first websocket attempt does not try another node', async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  const sockets = [];
+  class FakeWebSocket {
+    constructor(url) { this.url = url; this.listeners = new Map(); sockets.push(this); }
+    addEventListener(name, callback) { this.listeners.set(name, callback); }
+    close() { this.listeners.get('close')?.({ code: 1000 }); }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+  const client = new BilibiliLiveClient({ appId: '123', accessKey: 'key', accessSecret: 'secret' });
+  try {
+    client.gameId = 'game-1';
+    client.websocketInfo = { auth_body: '{}', wss_link: ['wss://first.test', 'wss://second.test'] };
+    client.request = async () => ({});
+    const connecting = client.connectSocket();
+    await client.stop();
+    await assert.rejects(connecting, /结束/);
+    assert.deepEqual(sockets.map((socket) => socket.url), ['wss://first.test']);
+    assert.equal(client.socket, null);
+    assert.equal(client.reconnectTimer, null);
+  } finally {
+    client.handleInteractionEnd();
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
 test('stops heartbeats and reconnecting after Bilibili ends the interaction', async () => {
   const originalWebSocket = globalThis.WebSocket;
   let socket;

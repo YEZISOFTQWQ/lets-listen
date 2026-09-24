@@ -143,11 +143,13 @@ class BilibiliLiveClient extends EventEmitter {
     const links = this.websocketInfo.wss_link;
     let lastError;
     for (let index = 0; index < links.length; index += 1) {
+      if (this.closedByUser || !this.gameId) throw new Error('互动场次已结束');
       try {
         await this.openSocket(links[index]);
         this.reconnectAttempt = 0;
         return;
       } catch (error) {
+        if (this.closedByUser || !this.gameId) throw error;
         lastError = error;
         this.emit('diagnostic', {
           level: 'warn',
@@ -163,6 +165,7 @@ class BilibiliLiveClient extends EventEmitter {
       let settled = false;
       let authenticated = false;
       const socket = new WebSocket(url);
+      this.socket = socket;
       socket.binaryType = 'arraybuffer';
       const timeout = setTimeout(() => {
         if (settled) return;
@@ -172,11 +175,12 @@ class BilibiliLiveClient extends EventEmitter {
       }, 12_000);
 
       socket.addEventListener('open', () => {
-        this.socket = socket;
+        if (settled || this.closedByUser || !this.gameId || this.socket !== socket) return;
         socket.send(encodePacket(Operation.AUTH, this.websocketInfo.auth_body));
       });
 
       socket.addEventListener('message', (event) => {
+        if (this.socket !== socket || this.closedByUser) return;
         try {
           const packets = parsePacketStream(Buffer.from(event.data));
           for (const packet of packets) {
@@ -239,7 +243,7 @@ class BilibiliLiveClient extends EventEmitter {
         }
         if (!settled) {
           settled = true;
-          reject(new Error(`WebSocket 提前关闭（${event.code}）`));
+          reject(new Error(this.closedByUser ? '互动场次已结束' : `WebSocket 提前关闭（${event.code}）`));
           return;
         }
         if (authenticated && wasCurrent && !this.closedByUser && this.gameId) {
@@ -305,6 +309,7 @@ class BilibiliLiveClient extends EventEmitter {
       try {
         await this.connectSocket();
       } catch (error) {
+        if (this.closedByUser || !this.gameId) return;
         this.emit('diagnostic', { level: 'error', message: `重连失败：${error.message}` });
         this.scheduleReconnect();
       }
