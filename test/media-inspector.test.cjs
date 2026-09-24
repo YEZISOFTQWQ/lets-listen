@@ -59,7 +59,7 @@ test('accepts a small cover and rejects empty, unsupported, or oversized covers'
   const text = path.join(root, 'note.txt');
   const renamedText = path.join(root, 'renamed.png');
   const wrongExtension = path.join(root, 'wrong-extension.jpg');
-  await fs.writeFile(cover, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'));
+  await fs.writeFile(cover, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64'));
   await fs.writeFile(empty, '');
   await fs.writeFile(huge, 'x');
   await fs.truncate(huge, MAX_COVER_BYTES + 1);

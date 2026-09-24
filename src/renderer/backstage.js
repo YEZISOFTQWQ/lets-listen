@@ -19,6 +19,7 @@ let snapshot = { currentTrackId: '', tracks: [], playback: {}, connection: {}, s
 let selectedId = '';
 let dirty = false;
 let pendingCover = null;
+let coverSelectionRevision = 0;
 let editRevision = 0;
 let playlistSignature = '';
 let dragDepth = 0;
@@ -114,6 +115,7 @@ function render(snapshotNext) {
   if (!snapshot.tracks.some((track) => track.id === selectedId)) {
     selectedId = snapshot.currentTrackId || snapshot.tracks[0]?.id || '';
   }
+  if (selectedId !== previousSelection) coverSelectionRevision += 1;
 
   renderPlaylist();
   const optionSignature = snapshot.tracks.map((track) => `${track.id}:${track.number}:${track.title}`).join('|');
@@ -326,6 +328,7 @@ elements.trackSelect.addEventListener('change', () => {
     return;
   }
   selectedId = elements.trackSelect.value;
+  coverSelectionRevision += 1;
   editRevision += 1;
   dirty = false;
   renderSelected(true);
@@ -339,11 +342,13 @@ for (const id of ['titleInput', 'submitterInput', 'descriptionInput']) {
   });
 }
 elements.chooseCoverButton.addEventListener('click', async () => {
+  const selectionAtOpen = selectedId;
+  const selectionRevision = ++coverSelectionRevision;
   try {
-    const selectionAtOpen = selectedId;
     const selected = await api.selectCover();
     if (!selected) return;
     await window.validateCoverImage(selected.dataUrl);
+    if (coverSelectionRevision !== selectionRevision) return;
     if (selectedId !== selectionAtOpen) {
       setStatus('选择封面期间切换了曲目，请重新选择封面', true);
       return;
@@ -354,10 +359,12 @@ elements.chooseCoverButton.addEventListener('click', async () => {
     elements.coverState.textContent = `待保存：${selected.path.split(/[\\/]/).pop()}`;
     setStatus('封面尚未保存');
   } catch (error) {
+    if (coverSelectionRevision !== selectionRevision) return;
     setStatus(`选择封面失败：${error.message}`, true);
   }
 });
 elements.clearCoverButton.addEventListener('click', () => {
+  coverSelectionRevision += 1;
   editRevision += 1;
   pendingCover = { path: '', dataUrl: '' };
   dirty = true;

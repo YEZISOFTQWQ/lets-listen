@@ -768,7 +768,7 @@ function createWindow() {
             `window.backstageApi.updateTrack({ id: 'qa-track', title: '  ' }).then(() => false, () => true)`,
           );
           if (!invalidTitleRejected) throw new Error('后台允许保存空曲名');
-          const coverDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/zQAAAABJRU5ErkJggg==';
+          const coverDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
           const brokenCoverPath = path.join(app.getPath('temp'), `lets-listen-broken-cover-${randomUUID()}.png`);
           const validCoverPath = path.join(app.getPath('temp'), `lets-listen-valid-cover-${randomUUID()}.png`);
           const originalOpenDialog = dialog.showOpenDialog;
@@ -831,6 +831,52 @@ function createWindow() {
               || backstageValidCover.path !== validCoverPath
               || !backstageValidCover.dirty || !backstageValidCover.saved) {
               throw new Error(`后台无法选择并保存有效封面：${JSON.stringify(backstageValidCover)}`);
+            }
+            const mainClearedDuringDecode = await mainWindow.webContents.executeJavaScript(`(async () => {
+              const originalValidate = window.validateCoverImage;
+              let releaseDecode;
+              window.validateCoverImage = () => new Promise((resolve) => { releaseDecode = resolve; });
+              try {
+                openTrackEditor();
+                const choosing = chooseTrackCover();
+                for (let retry = 0; retry < 100 && !releaseDecode; retry += 1) {
+                  await new Promise((resolve) => setTimeout(resolve, 20));
+                }
+                if (!releaseDecode) throw new Error('主窗口没有开始封面解码');
+                document.getElementById('clearCoverButton').click();
+                releaseDecode();
+                await choosing;
+                return { dataUrl: state.pendingCoverDataUrl, path: state.pendingCoverPath };
+              } finally {
+                window.validateCoverImage = originalValidate;
+                document.getElementById('trackEditDialog').close();
+              }
+            })()`);
+            if (mainClearedDuringDecode.dataUrl || mainClearedDuringDecode.path) {
+              throw new Error(`主窗口清除封面被迟到的选择覆盖：${JSON.stringify(mainClearedDuringDecode)}`);
+            }
+            const backstageClearedDuringDecode = await backstageWindow.webContents.executeJavaScript(`(async () => {
+              const originalValidate = window.validateCoverImage;
+              let releaseDecode;
+              window.validateCoverImage = () => new Promise((resolve) => { releaseDecode = resolve; });
+              try {
+                document.getElementById('chooseCoverButton').click();
+                for (let retry = 0; retry < 100 && !releaseDecode; retry += 1) {
+                  await new Promise((resolve) => setTimeout(resolve, 20));
+                }
+                if (!releaseDecode) throw new Error('后台没有开始封面解码');
+                document.getElementById('clearCoverButton').click();
+                releaseDecode();
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                return { cover: pendingCover, dirty, status: document.getElementById('status').textContent };
+              } finally {
+                window.validateCoverImage = originalValidate;
+                renderSelected(true);
+              }
+            })()`);
+            if (backstageClearedDuringDecode.cover?.dataUrl || backstageClearedDuringDecode.cover?.path
+              || !backstageClearedDuringDecode.dirty) {
+              throw new Error(`后台清除封面被迟到的选择覆盖：${JSON.stringify(backstageClearedDuringDecode)}`);
             }
           } finally {
             dialog.showOpenDialog = originalOpenDialog;

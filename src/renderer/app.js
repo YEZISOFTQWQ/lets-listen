@@ -31,6 +31,7 @@ const state = {
   dragDepth: 0,
   pendingCoverDataUrl: '',
   pendingCoverPath: '',
+  coverSelectionRevision: 0,
   editingTrackId: '',
   editingTrackStale: false,
 };
@@ -387,6 +388,7 @@ function openTrackEditor() {
     return;
   }
   state.editingTrackId = track.id;
+  state.coverSelectionRevision += 1;
   state.editingTrackStale = false;
   state.pendingCoverDataUrl = track.coverDataUrl || '';
   state.pendingCoverPath = track.coverPath || '';
@@ -399,16 +401,20 @@ function openTrackEditor() {
 }
 
 async function chooseTrackCover() {
+  const editingTrackId = state.editingTrackId;
+  const coverSelectionRevision = ++state.coverSelectionRevision;
   try {
-    const editingTrackId = state.editingTrackId;
     const selected = await api.selectCover();
     if (!selected) return;
     await window.validateCoverImage(selected.dataUrl);
-    if (!elements.trackEditDialog.open || state.editingTrackId !== editingTrackId) return;
+    if (!elements.trackEditDialog.open || state.editingTrackId !== editingTrackId
+      || state.coverSelectionRevision !== coverSelectionRevision) return;
     state.pendingCoverDataUrl = selected.dataUrl || '';
     state.pendingCoverPath = selected.path || '';
     renderTrackCoverPreview(state.pendingCoverDataUrl);
   } catch (error) {
+    if (!elements.trackEditDialog.open || state.editingTrackId !== editingTrackId
+      || state.coverSelectionRevision !== coverSelectionRevision) return;
     showToast(`封面导入失败：${error.message}`, 'error');
   }
 }
@@ -956,6 +962,7 @@ function bindEvents() {
   });
   elements.chooseCoverButton.addEventListener('click', chooseTrackCover);
   elements.clearCoverButton.addEventListener('click', () => {
+    state.coverSelectionRevision += 1;
     state.pendingCoverDataUrl = '';
     state.pendingCoverPath = '';
     renderTrackCoverPreview('');
