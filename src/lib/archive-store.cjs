@@ -72,7 +72,20 @@ class ArchiveStore {
   async exportCsv(sessionId, destination) {
     const filePath = this.sessions.get(sessionId);
     if (!filePath) throw new Error('找不到当前存档文件');
+    if (typeof destination !== 'string' || path.extname(destination).toLowerCase() !== '.csv') {
+      throw new Error('导出目标必须是 .csv 文件，不能覆盖原始存档');
+    }
     if (this.pendingWrites.has(sessionId)) await this.pendingWrites.get(sessionId);
+    const sourceInfo = await fs.stat(filePath);
+    let destinationInfo;
+    try {
+      destinationInfo = await fs.stat(destination);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (destinationInfo && sourceInfo.dev === destinationInfo.dev && sourceInfo.ino === destinationInfo.ino) {
+      throw new Error('导出目标指向原始存档，不能覆盖');
+    }
     const content = await fs.readFile(filePath, 'utf8');
     const lines = content.split(/\r?\n/).filter(Boolean);
     const records = [];

@@ -53,3 +53,22 @@ test('serializes rapid comments and still exports after a truncated final JSONL 
   assert.match(rows[1], /乐评 0/);
   assert.match(rows[100], /乐评 99/);
 });
+
+test('refuses to overwrite the source archive during CSV export', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lets-listen-archive-overwrite-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ArchiveStore(root);
+  const session = await store.startSession();
+  await store.append(session.sessionId, { type: 'comment', trackId: '01', comment: '保留原始乐评' });
+  const before = await fs.readFile(session.filePath, 'utf8');
+  await assert.rejects(store.exportCsv(session.sessionId, session.filePath), /存档|覆盖/);
+  const alias = path.join(root, 'source-alias.csv');
+  await fs.link(session.filePath, alias);
+  await assert.rejects(store.exportCsv(session.sessionId, alias), /存档|覆盖/);
+  assert.equal(await fs.readFile(session.filePath, 'utf8'), before);
+  const existingCsv = path.join(root, 'existing.csv');
+  await fs.writeFile(existingCsv, '旧的 CSV');
+  await store.exportCsv(session.sessionId, existingCsv);
+  assert.match(await fs.readFile(existingCsv, 'utf8'), /保留原始乐评/);
+  assert.equal(await fs.readFile(session.filePath, 'utf8'), before);
+});
