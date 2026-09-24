@@ -443,10 +443,23 @@ function createWindow() {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         const loopbackServer = process.env.LETS_LISTEN_QA_RTMP_SERVER || '';
+        const streamVideoPath = process.env.LETS_LISTEN_QA_VIDEO || '';
         const outputPath = process.env.LETS_LISTEN_QA_OUTPUT
           || path.join(app.getPath('temp'), `lets-listen-stream-qa-${randomUUID()}.mp4`);
         try {
           mainWindow.setFullScreen(true);
+          if (streamVideoPath) {
+            const inspected = await inspectMediaFiles([streamVideoPath]);
+            if (inspected.length !== 1 || inspected[0].error || inspected[0].type !== 'video') {
+              throw new Error(`推流视频导入失败：${JSON.stringify(inspected)}`);
+            }
+            await mainWindow.webContents.executeJavaScript(`(async () => {
+              await addTracks(${JSON.stringify(inspected)});
+              setCommentOpacity(46, false);
+              processDanmaku({ open_id: 'qa-stream-video-viewer', uname: '视频观众',
+                msg: '#01评 视频推流评论', msg_id: 'qa-stream-video-comment' }, 'mock');
+            })()`);
+          }
           const playing = await mainWindow.webContents.executeJavaScript(`(async () => {
             const media = document.getElementById('mediaElement');
             media.loop = true;
@@ -454,7 +467,23 @@ function createWindow() {
             await media.play();
             return !media.paused;
           })()`);
-          if (!playing) throw new Error('QA 测试音无法播放');
+          if (!playing) throw new Error('QA 测试媒体无法播放');
+          if (streamVideoPath) {
+            const video = await mainWindow.webContents.executeJavaScript(`(() => ({
+              width: document.getElementById('mediaElement').videoWidth,
+              height: document.getElementById('mediaElement').videoHeight,
+              videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
+              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
+              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
+              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none',
+              comment: document.getElementById('commentStream').textContent,
+            }))()`);
+            if (video.width < 640 || video.height < 360 || !video.videoMode
+              || !video.trackHidden || !video.scoreHidden || !video.commentsVisible
+              || !video.comment.includes('视频推流评论')) {
+              throw new Error(`推流视频模式异常：${JSON.stringify(video)}`);
+            }
+          }
           if (!loopbackServer) {
             let visualizer;
             for (let retry = 0; retry < 20; retry += 1) {

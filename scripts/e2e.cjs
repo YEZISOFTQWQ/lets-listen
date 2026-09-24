@@ -66,10 +66,12 @@ function freeLoopbackPort() {
   });
 }
 
-async function checkRtmpLoopback() {
+async function checkRtmpLoopback({ videoMode = false } = {}) {
   const port = await freeLoopbackPort();
   const server = `rtmp://127.0.0.1:${port}/live`;
   const receivedPath = path.join(os.tmpdir(), `lets-listen-rtmp-loopback-${randomUUID()}.mp4`);
+  const sourceVideoPath = videoMode
+    ? path.join(os.tmpdir(), `lets-listen-rtmp-source-${randomUUID()}.mp4`) : '';
   const receiver = spawn('ffmpeg', [
     '-hide_banner', '-loglevel', 'warning', '-y', '-listen', '1',
     '-i', `${server}/qa-stream-key`, '-c', 'copy', receivedPath,
@@ -84,11 +86,21 @@ async function checkRtmpLoopback() {
   });
   receiverDone.catch(() => {});
   try {
+    if (videoMode) {
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+        '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi',
+        '-i', 'sine=frequency=440:sample_rate=48000', '-t', '13',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', sourceVideoPath,
+      ]);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1200));
     if (receiver.exitCode !== null) throw new Error(`本地 RTMP 接收端提前退出：${receiverOutput}`);
-    await checkElectron(['--qa-demo', '--qa-program', '--qa-stream'], '[qa] RTMP loopback stream encoded', {
+    await checkElectron(videoMode ? ['--qa-program', '--qa-stream']
+      : ['--qa-demo', '--qa-program', '--qa-stream'], '[qa] RTMP loopback stream encoded', {
       timeoutMs: 65000,
-      env: { LETS_LISTEN_QA_RTMP_SERVER: server },
+      env: { LETS_LISTEN_QA_RTMP_SERVER: server, ...(videoMode ? { LETS_LISTEN_QA_VIDEO: sourceVideoPath } : {}) },
       executable: process.env.LETS_LISTEN_QA_PACKAGED_EXE || undefined,
     });
     let receiverTimer;
@@ -127,7 +139,20 @@ async function checkRtmpLoopback() {
     ]);
     const volume = Number(sound.match(/max_volume:\s*(-?\d+(?:\.\d+)?) dB/)?.[1]);
     assert.ok(volume > -35, `RTMP 音轨可能是静音：最大音量 ${volume} dB`);
-    process.stdout.write(`✓ 本机 RTMP 收到 ${video.duration} 秒非空白 H.264 画面及 AAC 音频（${volume} dB）\n`);
+    if (videoMode) {
+      const frameHashAt = async (second) => {
+        const frames = await run('ffmpeg', [
+          '-hide_banner', '-loglevel', 'error', '-ss', String(second), '-i', receivedPath,
+          '-frames:v', '1', '-f', 'framemd5', 'pipe:1',
+        ]);
+        return frames.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).pop()?.split(',').pop()?.trim();
+      };
+      const firstFrame = await frameHashAt(3);
+      const laterFrame = await frameHashAt(7);
+      assert.ok(firstFrame && laterFrame && firstFrame !== laterFrame,
+        `RTMP 视频帧没有变化：${firstFrame} -> ${laterFrame}`);
+    }
+    process.stdout.write(`✓ 本机 RTMP ${videoMode ? '视频模式' : '音频模式'}收到 ${video.duration} 秒非空白 H.264 画面及 AAC 音频（${volume} dB）\n`);
   } finally {
     if (receiver.exitCode === null) receiver.kill();
     await receiverDone.catch(() => {});
@@ -137,6 +162,13 @@ async function checkRtmpLoopback() {
       throw new Error('拒绝清理非本次 RTMP 测试录像');
     }
     await fs.rm(receivedPath, { force: true });
+    if (sourceVideoPath) {
+      if (!path.resolve(sourceVideoPath).startsWith(temporaryRoot)
+        || !path.basename(sourceVideoPath).startsWith('lets-listen-rtmp-source-')) {
+        throw new Error('拒绝清理非本次 RTMP 测试视频');
+      }
+      await fs.rm(sourceVideoPath, { force: true });
+    }
   }
 }
 
@@ -262,6 +294,7 @@ async function main() {
   process.stdout.write(`✓ 真实节目帧和应用音轨：YMAX=${maximumBrightness}, SATMAX=${maximumSaturation}, max=${maximumVolume} dB\n`);
 
   await checkRtmpLoopback();
+  await checkRtmpLoopback({ videoMode: true });
 
   const temporaryRoot = path.resolve(os.tmpdir()) + path.sep;
   if (!path.resolve(outputPath).startsWith(temporaryRoot) || !path.basename(outputPath).startsWith('lets-listen-e2e-')) {
@@ -270,7 +303,8 @@ async function main() {
   await fs.rm(outputPath);
 }
 
-(process.argv.includes('--only-rtmp') ? checkRtmpLoopback() : main()).catch((error) => {
+(process.argv.includes('--only-rtmp-video') ? checkRtmpLoopback({ videoMode: true })
+  : process.argv.includes('--only-rtmp') ? checkRtmpLoopback() : main()).catch((error) => {
   process.stderr.write(`${error.stack || error.message}\n`);
   process.stderr.write(`测试录像（如已生成）：${outputPath}\n`);
   process.exitCode = 1;
