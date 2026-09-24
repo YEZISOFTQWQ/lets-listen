@@ -112,7 +112,9 @@ class StreamController extends EventEmitter {
       this.child = null;
       this.target = '';
       this.mode = '';
-      this.update('error', `FFmpeg 启动失败：${error.message}`);
+      this.update('error', mode === 'live'
+        ? 'FFmpeg 启动失败：请检查 FFmpeg 路径和系统权限'
+        : `FFmpeg 启动失败：${error.message}`);
     });
     child.on('close', (code) => {
       if (this.child !== child) return;
@@ -122,8 +124,9 @@ class StreamController extends EventEmitter {
       if (code === 0 && this.intentionalStop) {
         this.update('idle', mode === 'test' ? `测试录制已保存：${path.basename(target)}` : '推流已停止');
       } else {
-        let safeError = lastError.replaceAll(target, '[推流地址已隐藏]');
-        if (options.key) safeError = safeError.replaceAll(String(options.key), '[密钥已隐藏]');
+        const safeError = mode === 'live'
+          ? '请检查推流地址、串流密钥、网络和编码设置'
+          : lastError.replaceAll(target, '[输出地址已隐藏]');
         this.update('error', `推流进程退出（${code ?? '未知'}）：${safeError || '请检查推流地址、网络和编码设置'}`);
       }
       this.target = '';
@@ -131,13 +134,17 @@ class StreamController extends EventEmitter {
     });
     return { executable, mode };
     } catch (error) {
+      const safeError = mode === 'live'
+        && error.message !== '推流启动已取消'
+        && !error.message?.startsWith('未找到 FFmpeg')
+        ? new Error('内置推流启动失败，请检查 FFmpeg 路径和推流设置') : error;
       if (generation === this.generation) {
         this.starting = false;
         this.target = '';
         this.mode = '';
-        this.update('error', error.message);
+        this.update('error', safeError.message);
       }
-      throw error;
+      throw safeError;
     }
   }
 

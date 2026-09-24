@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
 const { randomUUID } = require('node:crypto');
 const { readCoverFile } = require('../src/lib/media-inspector.cjs');
 
@@ -37,7 +38,8 @@ function run(executable, args, { timeoutMs = 30000, env = process.env } = {}) {
 async function checkElectron(args, marker, options = {}) {
   const archiveRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lets-listen-e2e-archive-'));
   try {
-    const output = await run(electron, ['.', ...args], {
+    const executable = options.executable || electron;
+    const output = await run(executable, options.executable ? args : ['.', ...args], {
       ...options,
       env: { ...process.env, ...options.env, LETS_LISTEN_QA_ARCHIVE: archiveRoot },
     });
@@ -50,6 +52,91 @@ async function checkElectron(args, marker, options = {}) {
       throw new Error('拒绝清理非本次测试存档');
     }
     await fs.rm(archiveRoot, { recursive: true, force: true });
+  }
+}
+
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+async function checkRtmpLoopback() {
+  const port = await freeLoopbackPort();
+  const server = `rtmp://127.0.0.1:${port}/live`;
+  const receivedPath = path.join(os.tmpdir(), `lets-listen-rtmp-loopback-${randomUUID()}.mp4`);
+  const receiver = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'warning', '-y', '-listen', '1',
+    '-i', `${server}/qa-stream-key`, '-c', 'copy', receivedPath,
+  ], { cwd: projectRoot, windowsHide: true });
+  let receiverOutput = '';
+  receiver.stderr.on('data', (chunk) => {
+    receiverOutput = (receiverOutput + chunk.toString()).slice(-10000);
+  });
+  const receiverDone = new Promise((resolve, reject) => {
+    receiver.once('error', reject);
+    receiver.once('close', resolve);
+  });
+  receiverDone.catch(() => {});
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (receiver.exitCode !== null) throw new Error(`本地 RTMP 接收端提前退出：${receiverOutput}`);
+    await checkElectron(['--qa-demo', '--qa-program', '--qa-stream'], '[qa] RTMP loopback stream encoded', {
+      timeoutMs: 65000,
+      env: { LETS_LISTEN_QA_RTMP_SERVER: server },
+      executable: process.env.LETS_LISTEN_QA_PACKAGED_EXE || undefined,
+    });
+    let receiverTimer;
+    let receiverCode;
+    try {
+      receiverCode = await Promise.race([
+        receiverDone,
+        new Promise((_, reject) => {
+          receiverTimer = setTimeout(() => reject(new Error('本地 RTMP 接收端未结束')), 10000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(receiverTimer);
+    }
+    assert.equal(receiverCode, 0, `本地 RTMP 接收失败：${receiverOutput}`);
+    const probe = JSON.parse(await run('ffprobe', [
+      '-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,duration', '-of', 'json', receivedPath,
+    ]));
+    const video = probe.streams.find((stream) => stream.codec_type === 'video');
+    const audio = probe.streams.find((stream) => stream.codec_type === 'audio');
+    assert.equal(video?.codec_name, 'h264');
+    assert.equal(video.width, 1280);
+    assert.equal(video.height, 720);
+    assert.ok(Number(video.duration) >= 6, `RTMP 视频时长不足：${video?.duration}`);
+    assert.equal(audio?.codec_name, 'aac');
+    const picture = await run('ffmpeg', [
+      '-hide_banner', '-ss', '5', '-i', receivedPath, '-frames:v', '1',
+      '-vf', 'signalstats,metadata=print', '-f', 'null', 'NUL',
+    ]);
+    const brightness = Number(picture.match(/signalstats\.YMAX=(\d+)/)?.[1]);
+    const saturation = Number(picture.match(/signalstats\.SATMAX=(\d+)/)?.[1]);
+    assert.ok(brightness > 150 && saturation > 20,
+      `RTMP 接收到的可能是空白画面：YMAX=${brightness}, SATMAX=${saturation}`);
+    const sound = await run('ffmpeg', [
+      '-hide_banner', '-i', receivedPath, '-vn', '-af', 'volumedetect', '-f', 'null', 'NUL',
+    ]);
+    const volume = Number(sound.match(/max_volume:\s*(-?\d+(?:\.\d+)?) dB/)?.[1]);
+    assert.ok(volume > -35, `RTMP 音轨可能是静音：最大音量 ${volume} dB`);
+    process.stdout.write(`✓ 本机 RTMP 收到 ${video.duration} 秒非空白 H.264 画面及 AAC 音频（${volume} dB）\n`);
+  } finally {
+    if (receiver.exitCode === null) receiver.kill();
+    await receiverDone.catch(() => {});
+    const temporaryRoot = path.resolve(os.tmpdir()) + path.sep;
+    if (!path.resolve(receivedPath).startsWith(temporaryRoot)
+      || !path.basename(receivedPath).startsWith('lets-listen-rtmp-loopback-')) {
+      throw new Error('拒绝清理非本次 RTMP 测试录像');
+    }
+    await fs.rm(receivedPath, { force: true });
   }
 }
 
@@ -174,6 +261,8 @@ async function main() {
   assert.ok(maximumVolume > -35, `应用音频未进入录像：最大音量 ${maximumVolume} dB`);
   process.stdout.write(`✓ 真实节目帧和应用音轨：YMAX=${maximumBrightness}, SATMAX=${maximumSaturation}, max=${maximumVolume} dB\n`);
 
+  await checkRtmpLoopback();
+
   const temporaryRoot = path.resolve(os.tmpdir()) + path.sep;
   if (!path.resolve(outputPath).startsWith(temporaryRoot) || !path.basename(outputPath).startsWith('lets-listen-e2e-')) {
     throw new Error('拒绝清理非本次临时录像');
@@ -181,7 +270,7 @@ async function main() {
   await fs.rm(outputPath);
 }
 
-main().catch((error) => {
+(process.argv.includes('--only-rtmp') ? checkRtmpLoopback() : main()).catch((error) => {
   process.stderr.write(`${error.stack || error.message}\n`);
   process.stderr.write(`测试录像（如已生成）：${outputPath}\n`);
   process.exitCode = 1;

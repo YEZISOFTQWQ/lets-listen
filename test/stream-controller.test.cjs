@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const { StreamController, buildRtmpTarget, buildFfmpegArgs } = require('../src/lib/stream-controller.cjs');
 
 test('joins RTMP server and stream key without a shell', () => {
@@ -75,4 +76,44 @@ test('repeated stop notifications keep the encoder in one graceful shutdown', ()
   assert.equal(killed, 0);
   assert.equal(controller.status.status, 'stopping');
   controller.abort();
+});
+
+test('never exposes a live stream key when FFmpeg splits an error across chunks', async () => {
+  const child = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  const controller = new StreamController({
+    resolveExecutable: async () => 'ffmpeg',
+    spawnProcess: () => child,
+  });
+  await controller.start({ mode: 'live', server: 'rtmp://127.0.0.1/live', key: 'ultra-secret-token' });
+  child.stderr.emit('data', Buffer.from('Error opening rtmp://127.0.0.1/live/ultra-'));
+  child.stderr.emit('data', Buffer.from('secret-token: Connection refused'));
+  child.emit('close', 1);
+  assert.equal(controller.status.status, 'error');
+  assert.doesNotMatch(controller.status.message, /ultra|secret-token/i);
+});
+
+test('sanitizes asynchronous and synchronous live encoder startup errors', async () => {
+  const options = { mode: 'live', server: 'rtmp://127.0.0.1/live', key: 'ultra-secret-token' };
+  const child = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  const asynchronous = new StreamController({
+    resolveExecutable: async () => 'ffmpeg',
+    spawnProcess: () => child,
+  });
+  await asynchronous.start(options);
+  child.emit('error', new Error('ffmpeg failed for ultra-secret-token'));
+  assert.doesNotMatch(asynchronous.status.message, /ultra-secret-token/);
+
+  const synchronous = new StreamController({
+    resolveExecutable: async () => 'ffmpeg',
+    spawnProcess: () => { throw new Error('invalid target ultra-secret-token'); },
+  });
+  await assert.rejects(synchronous.start(options), (error) => {
+    assert.doesNotMatch(error.message, /ultra-secret-token/);
+    return true;
+  });
+  assert.doesNotMatch(synchronous.status.message, /ultra-secret-token/);
 });

@@ -159,6 +159,7 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -441,6 +442,7 @@ function createWindow() {
   } else if (qaStream) {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
+        const loopbackServer = process.env.LETS_LISTEN_QA_RTMP_SERVER || '';
         const outputPath = process.env.LETS_LISTEN_QA_OUTPUT
           || path.join(app.getPath('temp'), `lets-listen-stream-qa-${randomUUID()}.mp4`);
         try {
@@ -453,29 +455,31 @@ function createWindow() {
             return !media.paused;
           })()`);
           if (!playing) throw new Error('QA 测试音无法播放');
-          let visualizer;
-          for (let retry = 0; retry < 20; retry += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 100));
-            visualizer = await mainWindow.webContents.executeJavaScript(`(() => {
-              const levels = new Uint8Array(state.analyser.frequencyBinCount);
-              state.analyser.getByteFrequencyData(levels);
-              const canvas = document.getElementById('visualizer');
-              const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-              let drawn = false;
-              for (let index = 3; index < pixels.length; index += 4) {
-                if (pixels[index] > 0) { drawn = true; break; }
-              }
-              return { level: Math.max(...levels), width: canvas.width, height: canvas.height, drawn };
-            })()`);
-            if (visualizer.level > 0 && visualizer.drawn) break;
-          }
-          if (visualizer.level <= 0 || visualizer.width <= 1 || visualizer.height <= 1 || !visualizer.drawn) {
-            throw new Error(`音频可视化没有绘制有效频谱：${JSON.stringify(visualizer)}`);
+          if (!loopbackServer) {
+            let visualizer;
+            for (let retry = 0; retry < 20; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              visualizer = await mainWindow.webContents.executeJavaScript(`(() => {
+                const levels = new Uint8Array(state.analyser.frequencyBinCount);
+                state.analyser.getByteFrequencyData(levels);
+                const canvas = document.getElementById('visualizer');
+                const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                let drawn = false;
+                for (let index = 3; index < pixels.length; index += 4) {
+                  if (pixels[index] > 0) { drawn = true; break; }
+                }
+                return { level: Math.max(...levels), width: canvas.width, height: canvas.height, drawn };
+              })()`);
+              if (visualizer.level > 0 && visualizer.drawn) break;
+            }
+            if (visualizer.level <= 0 || visualizer.width <= 1 || visualizer.height <= 1 || !visualizer.drawn) {
+              throw new Error(`音频可视化没有绘制有效频谱：${JSON.stringify(visualizer)}`);
+            }
           }
           openBackstageWindow();
           await new Promise((resolve) => backstageWindow.webContents.once('did-finish-load', resolve));
           const completed = new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('测试录制超时')), 25000);
+            const timeout = setTimeout(() => reject(new Error('测试推流超时')), loopbackServer ? 40000 : 25000);
             const listener = (state) => {
               if (!['idle', 'error'].includes(state.status)) return;
               clearTimeout(timeout);
@@ -486,13 +490,19 @@ function createWindow() {
             streamController.on('state', listener);
           });
           await backstageWindow.webContents.executeJavaScript(
-            `window.backstageApi.startStream(${JSON.stringify({ mode: 'test', filePath: outputPath, quality: '720p' })})`,
+            `window.backstageApi.startStream(${JSON.stringify(loopbackServer
+              ? { mode: 'live', server: loopbackServer, key: 'qa-stream-key', quality: '720p' }
+              : { mode: 'test', filePath: outputPath, quality: '720p' })})`,
           );
           await completed;
-          const result = await fs.stat(outputPath);
-          if (result.size < 10000) throw new Error(`录像过小：${result.size} 字节`);
-          console.log(`[qa] stream container encoded (${result.size} bytes; inspect visible picture/audio on the target desktop): ${outputPath}`);
-          if (!process.argv.includes('--qa-keep-stream')) await fs.unlink(outputPath);
+          if (loopbackServer) {
+            console.log('[qa] RTMP loopback stream encoded');
+          } else {
+            const result = await fs.stat(outputPath);
+            if (result.size < 10000) throw new Error(`录像过小：${result.size} 字节`);
+            console.log(`[qa] stream container encoded (${result.size} bytes; inspect visible picture/audio on the target desktop): ${outputPath}`);
+            if (!process.argv.includes('--qa-keep-stream')) await fs.unlink(outputPath);
+          }
           app.quit();
         } catch (error) {
           console.error(`[qa] stream recording failed: ${error.message}`);
@@ -1370,7 +1380,8 @@ function registerIpc() {
     sendToRenderer('stream:start-capture', {
       id: activeCaptureId,
       mediaSourceId: mainWindow.getMediaSourceId(),
-      testSeconds: options?.mode === 'test' ? 10 : 0,
+      testSeconds: options?.mode === 'test'
+        || (process.argv.includes('--qa-stream') && Boolean(process.env.LETS_LISTEN_QA_RTMP_SERVER)) ? 10 : 0,
     });
     captureStartTimer = setTimeout(() => {
       if (streamController.status.status === 'starting') {
