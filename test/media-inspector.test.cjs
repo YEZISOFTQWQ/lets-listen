@@ -30,16 +30,19 @@ test('imports a valid WAV but reports missing, empty, directory, and unsupported
   const valid = path.join(root, 'song.wav');
   const empty = path.join(root, 'empty.mp3');
   const unsupported = path.join(root, 'note.txt');
+  const unsupportedAvi = path.join(root, 'video.avi');
   const directory = path.join(root, 'folder.wav');
   await fs.writeFile(valid, silentWav());
   await fs.writeFile(empty, '');
   await fs.writeFile(unsupported, 'text');
+  await fs.writeFile(unsupportedAvi, 'AVI is not a Chromium playback format');
   await fs.mkdir(directory);
-  const result = await inspectMediaFiles([valid, path.join(root, 'missing.mp3'), empty, directory, unsupported]);
+  const result = await inspectMediaFiles([valid, path.join(root, 'missing.mp3'), empty, directory, unsupported, unsupportedAvi]);
   assert.equal(result[0].type, 'audio');
   assert.equal(result[0].title, 'song');
   assert.match(result[0].url, /^file:\/\//);
   for (const item of result.slice(1)) assert.ok(item.error, `expected error for ${item.path}`);
+  assert.equal(result.at(-1).error, '不支持的文件类型');
 });
 
 test('rejects invalid or oversized import batches', async () => {

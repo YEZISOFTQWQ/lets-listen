@@ -72,6 +72,28 @@ async function main() {
   } finally {
     await fs.rm(videoPath, { force: true });
   }
+  for (const format of [
+    { extension: 'webm', codecs: ['-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '8', '-c:a', 'libopus'] },
+    { extension: 'mkv', codecs: ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac'] },
+    { extension: 'mov', codecs: ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac'] },
+    { extension: 'm4v', codecs: ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac'] },
+  ]) {
+    const alternatePath = path.join(os.tmpdir(), `lets-listen-e2e-video-${randomUUID()}.${format.extension}`);
+    try {
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+        '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi',
+        '-i', 'sine=frequency=440:sample_rate=48000', '-t', '4',
+        ...format.codecs, alternatePath,
+      ]);
+      await checkElectron(['--qa-real-video'], '[qa] real video import and playback passed', {
+        env: { LETS_LISTEN_QA_VIDEO: alternatePath },
+      });
+      process.stdout.write(`✓ ${format.extension.toUpperCase()} 视频实际播放\n`);
+    } finally {
+      await fs.rm(alternatePath, { force: true });
+    }
+  }
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream-errors'], '[qa] stream error handling passed');
   await checkElectron(['--qa-demo', '--qa-archive-errors'], '[qa] archive failure warning passed');
   await checkElectron(['--qa-live-exit'], '[qa] pending live session retried on quit');

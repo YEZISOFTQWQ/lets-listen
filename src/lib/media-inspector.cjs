@@ -5,7 +5,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg']);
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mkv', '.mov', '.m4v']);
 const MAX_IMPORT_FILES = 500;
 const MAX_COVER_BYTES = 10 * 1024 * 1024;
 const COVER_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp']);
