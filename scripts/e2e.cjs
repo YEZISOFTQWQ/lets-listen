@@ -94,6 +94,29 @@ async function main() {
       await fs.rm(alternatePath, { force: true });
     }
   }
+  for (const format of [
+    { extension: 'wav', codecs: ['-c:a', 'pcm_s16le'] },
+    { extension: 'mp3', codecs: ['-c:a', 'libmp3lame', '-b:a', '128k'] },
+    { extension: 'flac', codecs: ['-c:a', 'flac'] },
+    { extension: 'm4a', codecs: ['-c:a', 'aac', '-b:a', '128k'] },
+    { extension: 'aac', codecs: ['-c:a', 'aac', '-b:a', '128k', '-f', 'adts'] },
+    { extension: 'ogg', codecs: ['-c:a', 'libvorbis', '-q:a', '4'] },
+  ]) {
+    const audioPath = path.join(os.tmpdir(), `lets-listen-e2e-audio-${randomUUID()}.${format.extension}`);
+    try {
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+        '-i', 'sine=frequency=440:sample_rate=48000', '-t', '4',
+        ...format.codecs, audioPath,
+      ]);
+      await checkElectron(['--qa-real-audio'], '[qa] real audio import and playback passed', {
+        env: { LETS_LISTEN_QA_AUDIO: audioPath },
+      });
+      process.stdout.write(`✓ ${format.extension.toUpperCase()} 音频实际播放及频谱\n`);
+    } finally {
+      await fs.rm(audioPath, { force: true });
+    }
+  }
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream-errors'], '[qa] stream error handling passed');
   await checkElectron(['--qa-demo', '--qa-archive-errors'], '[qa] archive failure warning passed');
   await checkElectron(['--qa-live-exit'], '[qa] pending live session retried on quit');

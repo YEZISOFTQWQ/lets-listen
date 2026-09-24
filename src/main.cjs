@@ -188,6 +188,7 @@ function createWindow() {
   const qaStream = process.argv.includes('--qa-stream');
   const qaStreamErrors = process.argv.includes('--qa-stream-errors');
   const qaRealVideo = process.argv.includes('--qa-real-video');
+  const qaRealAudio = process.argv.includes('--qa-real-audio');
   const qaLiveExit = process.argv.includes('--qa-live-exit');
   const qaComments = process.argv.includes('--qa-comments');
   const qaArchiveErrors = process.argv.includes('--qa-archive-errors');
@@ -282,6 +283,44 @@ function createWindow() {
           }
         });
         app.quit();
+      }, 1200);
+    });
+  } else if (qaRealAudio) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        try {
+          const audioPath = process.env.LETS_LISTEN_QA_AUDIO;
+          if (!audioPath) throw new Error('缺少测试音频路径');
+          const inspected = await inspectMediaFiles([audioPath]);
+          if (inspected.length !== 1 || inspected[0].error || inspected[0].type !== 'audio') {
+            throw new Error(`音频导入检查失败：${JSON.stringify(inspected)}`);
+          }
+          await mainWindow.webContents.executeJavaScript(`addTracks(${JSON.stringify(inspected)})`);
+          const result = await mainWindow.webContents.executeJavaScript(`(async () => {
+            await loadTrack(0, true);
+            let peak = 0;
+            for (let retry = 0; retry < 20 && peak === 0; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              const levels = new Uint8Array(state.analyser.frequencyBinCount);
+              state.analyser.getByteFrequencyData(levels);
+              peak = Math.max(...levels);
+            }
+            const media = document.getElementById('mediaElement');
+            return { paused: media.paused, time: media.currentTime, duration: media.duration,
+              peak, videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
+              title: document.getElementById('trackTitle').textContent };
+          })()`);
+          if (result.paused || result.time <= 0 || !Number.isFinite(result.duration)
+            || result.duration < 3 || result.peak <= 0
+            || result.videoMode || !result.title) {
+            throw new Error(`真实音频播放或频谱异常：${JSON.stringify(result)}`);
+          }
+          console.log('[qa] real audio import and playback passed');
+          app.quit();
+        } catch (error) {
+          console.error(`[qa] real audio import and playback failed: ${error.message}`);
+          app.exit(1);
+        }
       }, 1200);
     });
   } else if (qaRealVideo) {
