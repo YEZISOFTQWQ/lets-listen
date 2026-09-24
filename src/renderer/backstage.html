@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
   <title>lets-listen · 直播后台</title>
   <link rel="stylesheet" href="backstage.css">
 </head>
@@ -143,6 +143,7 @@
     </details>
     <p id="status" role="status" aria-live="polite"></p>
   </main>
+  <script src="cover-validation.js"></script>
   <script src="backstage.js"></script>
 </body>
 </html>

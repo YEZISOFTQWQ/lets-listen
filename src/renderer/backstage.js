@@ -343,6 +343,7 @@ elements.chooseCoverButton.addEventListener('click', async () => {
     const selectionAtOpen = selectedId;
     const selected = await api.selectCover();
     if (!selected) return;
+    await window.validateCoverImage(selected.dataUrl);
     if (selectedId !== selectionAtOpen) {
       setStatus('选择封面期间切换了曲目，请重新选择封面', true);
       return;

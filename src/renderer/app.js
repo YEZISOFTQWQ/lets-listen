@@ -400,8 +400,11 @@ function openTrackEditor() {
 
 async function chooseTrackCover() {
   try {
+    const editingTrackId = state.editingTrackId;
     const selected = await api.selectCover();
     if (!selected) return;
+    await window.validateCoverImage(selected.dataUrl);
+    if (!elements.trackEditDialog.open || state.editingTrackId !== editingTrackId) return;
     state.pendingCoverDataUrl = selected.dataUrl || '';
     state.pendingCoverPath = selected.path || '';
     renderTrackCoverPreview(state.pendingCoverDataUrl);

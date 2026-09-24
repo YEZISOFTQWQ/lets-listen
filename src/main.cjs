@@ -769,6 +769,74 @@ function createWindow() {
           );
           if (!invalidTitleRejected) throw new Error('后台允许保存空曲名');
           const coverDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/zQAAAABJRU5ErkJggg==';
+          const brokenCoverPath = path.join(app.getPath('temp'), `lets-listen-broken-cover-${randomUUID()}.png`);
+          const validCoverPath = path.join(app.getPath('temp'), `lets-listen-valid-cover-${randomUUID()}.png`);
+          const originalOpenDialog = dialog.showOpenDialog;
+          try {
+            await fs.writeFile(brokenCoverPath, Buffer.concat([
+              Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('broken-image-data'),
+            ]));
+            await fs.writeFile(validCoverPath, Buffer.from(coverDataUrl.split(',')[1], 'base64'));
+            dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [brokenCoverPath] });
+            const mainBrokenCover = await mainWindow.webContents.executeJavaScript(`(async () => {
+              openTrackEditor();
+              await chooseTrackCover();
+              const result = { unchanged: state.pendingCoverDataUrl === state.tracks[0].coverDataUrl,
+                toast: document.getElementById('toastContainer').textContent };
+              document.getElementById('trackEditDialog').close();
+              return result;
+            })()`);
+            if (!mainBrokenCover.unchanged || !mainBrokenCover.toast.includes('无法解码')) {
+              throw new Error(`主窗口接受了损坏封面：${JSON.stringify(mainBrokenCover)}`);
+            }
+            const backstageBrokenCover = await backstageWindow.webContents.executeJavaScript(`(async () => {
+              document.getElementById('chooseCoverButton').click();
+              for (let retry = 0; retry < 20
+                && !document.getElementById('status').textContent.includes('无法解码'); retry += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              return { pending: pendingCover, dirty,
+                status: document.getElementById('status').textContent };
+            })()`);
+            if (backstageBrokenCover.pending || backstageBrokenCover.dirty
+              || !backstageBrokenCover.status.includes('无法解码')) {
+              throw new Error(`后台接受了损坏封面：${JSON.stringify(backstageBrokenCover)}`);
+            }
+            dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [validCoverPath] });
+            const mainValidCover = await mainWindow.webContents.executeJavaScript(`(async () => {
+              openTrackEditor();
+              await chooseTrackCover();
+              const result = { dataUrl: state.pendingCoverDataUrl,
+                path: state.pendingCoverPath,
+                preview: document.querySelector('#trackCoverPreview img')?.getAttribute('src') };
+              document.getElementById('trackEditDialog').close();
+              return result;
+            })()`);
+            if (mainValidCover.dataUrl !== coverDataUrl || mainValidCover.path !== validCoverPath
+              || mainValidCover.preview !== coverDataUrl) {
+              throw new Error(`主窗口无法选择有效封面：${JSON.stringify(mainValidCover)}`);
+            }
+            const backstageValidCover = await backstageWindow.webContents.executeJavaScript(`(async () => {
+              document.getElementById('chooseCoverButton').click();
+              for (let retry = 0; retry < 100 && pendingCover?.path !== ${JSON.stringify(validCoverPath)}; retry += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              const selected = { dataUrl: pendingCover?.dataUrl, path: pendingCover?.path, dirty };
+              if (selected.path === ${JSON.stringify(validCoverPath)}) await saveMetadata();
+              return { ...selected, saved: !dirty && !pendingCover,
+                status: document.getElementById('status').textContent,
+                selectedId, buttonDisabled: document.getElementById('chooseCoverButton').disabled };
+            })()`);
+            if (backstageValidCover.dataUrl !== coverDataUrl
+              || backstageValidCover.path !== validCoverPath
+              || !backstageValidCover.dirty || !backstageValidCover.saved) {
+              throw new Error(`后台无法选择并保存有效封面：${JSON.stringify(backstageValidCover)}`);
+            }
+          } finally {
+            dialog.showOpenDialog = originalOpenDialog;
+            await fs.rm(brokenCoverPath, { force: true });
+            await fs.rm(validCoverPath, { force: true });
+          }
           await backstageWindow.webContents.executeJavaScript(
             `window.backstageApi.updateTrack(${JSON.stringify({ id: 'qa-track', coverDataUrl, coverPath: 'qa-cover.png' })})`,
           );
