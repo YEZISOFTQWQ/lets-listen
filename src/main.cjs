@@ -190,6 +190,7 @@ function createWindow() {
   const qaRealVideo = process.argv.includes('--qa-real-video');
   const qaLiveExit = process.argv.includes('--qa-live-exit');
   const qaComments = process.argv.includes('--qa-comments');
+  const qaArchiveErrors = process.argv.includes('--qa-archive-errors');
   mainWindow.loadFile(
     path.join(__dirname, 'renderer', 'index.html'),
     qaDemo || qaProgram || qaVideo ? { query: { qa: qaDemo ? '1' : '0', program: qaProgram ? '1' : '0', video: qaVideo ? '1' : '0', tone: qaStream ? '1' : '0' } } : undefined,
@@ -457,6 +458,73 @@ function createWindow() {
         } catch (error) {
           console.error(`[qa] stream recording failed: ${error.message}`);
           app.exit(1);
+        }
+      }, qaDemo ? 1800 : 1200);
+    });
+  } else if (qaArchiveErrors) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        const originalAppend = archiveStore.append;
+        const originalSaveDialog = dialog.showSaveDialog;
+        const exportPath = path.join(app.getPath('temp'), `lets-listen-archive-error-${randomUUID()}.csv`);
+        let failed = false;
+        try {
+          openBackstageWindow();
+          await new Promise((resolve) => backstageWindow.webContents.once('did-finish-load', resolve));
+          await mainWindow.webContents.executeJavaScript('state.archiveQueue');
+          const sessionId = backstageState.sessionId;
+          if (!sessionId) throw new Error('未创建测试存档');
+          archiveStore.append = (id, entry) => entry?.type === 'comment' && entry.msgId === 'qa-archive-fail'
+            ? Promise.reject(new Error('QA 模拟磁盘写入失败'))
+            : originalAppend.call(archiveStore, id, entry);
+          const observed = await mainWindow.webContents.executeJavaScript(`(async () => {
+            processDanmaku({ open_id: 'qa-archive-viewer', uname: '存档测试观众',
+              msg: '#01评 这条评论的归档将失败', msg_id: 'qa-archive-fail' }, 'mock');
+            await state.archiveQueue;
+            return { error: state.archiveError,
+              visible: document.getElementById('commentStream').textContent,
+              toast: document.getElementById('toastContainer').textContent };
+          })()`);
+          if (!observed.error.includes('QA 模拟磁盘写入失败')
+            || !observed.visible.includes('这条评论的归档将失败')
+            || !observed.toast.includes('存档写入失败')) {
+            throw new Error(`存档失败未向节目提示：${JSON.stringify(observed)}`);
+          }
+          archiveStore.append = originalAppend;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const feedback = await backstageWindow.webContents.executeJavaScript(
+            `document.getElementById('status').textContent`,
+          );
+          if (!feedback.includes('存档写入失败')) throw new Error(`后台没有存档失败提示：${feedback}`);
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportPath });
+          const exported = await backstageWindow.webContents.executeJavaScript(
+            `window.backstageApi.exportArchiveCsv(${JSON.stringify(sessionId)})`,
+          );
+          const csv = await fs.readFile(exportPath, 'utf8');
+          if (!exported.incomplete || csv.includes('qa-archive-fail')) {
+            throw new Error(`不完整存档被错误导出：${JSON.stringify(exported)}`);
+          }
+          await backstageWindow.webContents.executeJavaScript(
+            `document.getElementById('exportButton').click()`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const warning = await backstageWindow.webContents.executeJavaScript(`({
+            text: document.getElementById('status').textContent,
+            error: document.getElementById('status').classList.contains('error'),
+          })`);
+          if (!warning.error || !warning.text.includes('不完整')) {
+            throw new Error(`后台把不完整导出误报为成功：${JSON.stringify(warning)}`);
+          }
+          console.log('[qa] archive failure warning passed');
+        } catch (error) {
+          failed = true;
+          console.error(`[qa] archive failure warning failed: ${error.stack || error.message}`);
+        } finally {
+          archiveStore.append = originalAppend;
+          dialog.showSaveDialog = originalSaveDialog;
+          await fs.rm(exportPath, { force: true });
+          if (failed) app.exit(1);
+          else app.quit();
         }
       }, qaDemo ? 1800 : 1200);
     });
@@ -1091,10 +1159,16 @@ function registerIpc() {
       filters: [{ name: 'CSV 表格', extensions: ['csv'] }],
     });
     if (result.canceled || !result.filePath) return null;
+    let archiveError = '';
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
-      await mainWindow.webContents.executeJavaScript('typeof state === "undefined" ? undefined : state.archiveQueue');
+      archiveError = await mainWindow.webContents.executeJavaScript(`(async () => {
+        if (typeof state === 'undefined') return '';
+        await state.archiveQueue;
+        return state.archiveError || '';
+      })()`);
     }
-    return archiveStore.exportCsv(sessionId, result.filePath);
+    const exported = await archiveStore.exportCsv(sessionId, result.filePath);
+    return { ...exported, incomplete: Boolean(archiveError) };
   });
 
   streamController.on('state', (state) => {

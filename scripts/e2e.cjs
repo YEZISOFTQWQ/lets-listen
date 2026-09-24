@@ -73,6 +73,7 @@ async function main() {
     await fs.rm(videoPath, { force: true });
   }
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream-errors'], '[qa] stream error handling passed');
+  await checkElectron(['--qa-demo', '--qa-archive-errors'], '[qa] archive failure warning passed');
   await checkElectron(['--qa-live-exit'], '[qa] pending live session retried on quit');
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream', '--qa-keep-stream'],
     '[qa] stream container encoded', {

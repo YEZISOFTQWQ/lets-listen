@@ -294,7 +294,9 @@ elements.exportButton.addEventListener('click', async () => {
   if (!snapshot.sessionId) return;
   try {
     const result = await api.exportArchiveCsv(snapshot.sessionId);
-    if (result) setStatus(`已导出 ${result.count} 条评论/评分`);
+    if (result) setStatus(result.incomplete
+      ? `已导出 ${result.count} 条，但存档写入曾失败，文件可能不完整`
+      : `已导出 ${result.count} 条评论/评分`, Boolean(result.incomplete));
   } catch (error) {
     setStatus(`导出失败：${error.message}`, true);
   }

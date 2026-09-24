@@ -12,6 +12,8 @@ const state = {
   seenMessageIds: new Set(),
   sessionPromise: null,
   archiveQueue: Promise.resolve(),
+  archiveError: '',
+  archiveWarningAt: 0,
   sessionId: null,
   sessionPath: '',
   connected: false,
@@ -139,7 +141,14 @@ function archive(entry) {
       delete record.roundId;
     }
     await api.appendArchive(session.sessionId, record);
-  }).catch((error) => console.error('archive failed', error));
+  }).catch((error) => {
+    console.error('archive failed', error);
+    state.archiveError = error.message || String(error);
+    if (Date.now() - state.archiveWarningAt > 30_000) {
+      state.archiveWarningAt = Date.now();
+      showToast('存档写入失败：评论仍会显示，但导出可能不完整。请检查磁盘空间和存档目录权限。', 'error', 8000);
+    }
+  });
   return state.archiveQueue;
 }
 
@@ -728,7 +737,9 @@ async function exportArchive() {
     await state.archiveQueue;
     const session = await ensureArchive();
     const result = await api.exportArchiveCsv(session.sessionId);
-    if (result) showToast(`已导出 ${result.count} 条评论/评分`, 'success');
+    if (result) showToast(result.incomplete
+      ? `已导出 ${result.count} 条评论/评分，但存档写入曾失败，文件可能不完整`
+      : `已导出 ${result.count} 条评论/评分`, result.incomplete ? 'error' : 'success', 8000);
   } catch (error) {
     showToast(`导出失败：${error.message}`, 'error');
   }
