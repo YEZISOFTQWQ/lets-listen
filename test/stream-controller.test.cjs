@@ -57,3 +57,22 @@ test('invalid or oversized media chunks stop the encoder without throwing into E
   assert.doesNotThrow(() => controller.writeChunk(Buffer.alloc(8 * 1024 * 1024 + 1)));
   assert.equal(killed, 2);
 });
+
+test('repeated stop notifications keep the encoder in one graceful shutdown', () => {
+  let endings = 0;
+  let killed = 0;
+  const controller = new StreamController();
+  controller.child = {
+    stdin: {
+      destroyed: false,
+      end() { endings += 1; this.destroyed = true; },
+    },
+    kill() { killed += 1; },
+  };
+  controller.finish();
+  controller.finish();
+  assert.equal(endings, 1);
+  assert.equal(killed, 0);
+  assert.equal(controller.status.status, 'stopping');
+  controller.abort();
+});

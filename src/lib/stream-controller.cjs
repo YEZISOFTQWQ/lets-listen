@@ -164,6 +164,7 @@ class StreamController extends EventEmitter {
       return;
     }
     if (!this.child) return;
+    if (this.status.status === 'stopping') return;
     if (this.child.stdin.destroyed) {
       this.abort('编码输入已经关闭，推流已停止');
       return;

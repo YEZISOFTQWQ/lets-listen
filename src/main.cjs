@@ -173,7 +173,9 @@ function createWindow() {
     }
   });
   mainWindow.on('closed', () => {
-    if (activeCaptureId) streamController.abort('节目窗口已关闭，推流结束');
+    if (streamController.starting || streamController.child) {
+      streamController.abort('节目窗口已关闭，推流结束');
+    }
     mainWindow = null;
     if (backstageWindow && !backstageWindow.isDestroyed()) backstageWindow.close();
   });
@@ -362,6 +364,27 @@ function createWindow() {
             const canceled = await first;
             if (canceled.ok || !canceled.message.includes('取消') || streamController.child || activeCaptureId) {
               throw new Error(`启动中停止后仍有推流：${JSON.stringify(canceled)}`);
+            }
+            releaseProbe = null;
+            const leaving = backstageWindow.webContents.executeJavaScript(begin);
+            for (let retry = 0; retry < 40 && !releaseProbe; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (!releaseProbe) throw new Error('退出节目模式测试未进入 FFmpeg 检查');
+            await backstageWindow.webContents.executeJavaScript(
+              `window.backstageApi.command('leave-program')`,
+            );
+            for (let retry = 0; retry < 40 && streamController.starting; retry += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (backstageState.playback.programMode || streamController.starting) {
+              throw new Error('退出节目模式后未取消正在启动的推流');
+            }
+            releaseProbe('ffmpeg');
+            const leaveCanceled = await leaving;
+            if (leaveCanceled.ok || !leaveCanceled.message.includes('取消')
+              || streamController.child || activeCaptureId) {
+              throw new Error(`退出节目模式后仍有推流：${JSON.stringify(leaveCanceled)}`);
             }
           } finally {
             streamController.resolveExecutable = originalResolve;
@@ -946,7 +969,7 @@ function registerIpc() {
     if (backstageWindow && !backstageWindow.isDestroyed()) {
       backstageWindow.webContents.send('backstage:state', backstageState);
     }
-    if (activeCaptureId && !backstageState.playback.programMode) {
+    if ((activeCaptureId || streamController.starting) && !backstageState.playback.programMode) {
       requestCaptureStop();
     }
     return { ok: true };
@@ -1110,6 +1133,12 @@ function registerIpc() {
     if (!backstageState.playback.programMode) throw new Error('请先在主窗口进入节目模式');
     if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
     await streamController.start(options || {});
+    if (!mainWindow || mainWindow.isDestroyed() || !backstageState.playback.programMode) {
+      if (streamController.child || streamController.starting) {
+        streamController.abort('节目模式已退出，推流启动已取消');
+      }
+      throw new Error('节目模式已退出，推流启动已取消');
+    }
     activeCaptureId = randomUUID();
     sendToRenderer('stream:start-capture', {
       id: activeCaptureId,
@@ -1163,7 +1192,9 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', (event) => {
-  if (activeCaptureId) streamController.abort('软件退出，推流结束');
+  if (streamController.starting || streamController.child) {
+    streamController.abort('软件退出，推流结束');
+  }
   if (shutdownCleanupStarted || ((!liveClient || !liveClient.gameId) && !liveOperation)) return;
   event.preventDefault();
   shutdownCleanupStarted = true;
