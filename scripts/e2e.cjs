@@ -175,8 +175,8 @@ async function checkRtmpLoopback({ videoMode = false } = {}) {
 async function main() {
   await checkElectron(['--qa-demo', '--qa-description'], '[qa] backstage controls and description passed');
   await checkElectron(['--qa-demo', '--qa-program', '--qa-description'], '[qa] backstage controls and description passed');
-  await checkElectron(['--qa-demo', '--qa-comments'], '[qa] fullscreen comments passed');
-  await checkElectron(['--qa-demo', '--qa-video', '--qa-comments'], '[qa] fullscreen comments passed');
+  await checkElectron(['--qa-demo', '--qa-scrolling-description'], '[qa] scrolling description passed');
+  await checkElectron(['--qa-demo', '--qa-video', '--qa-scrolling-description'], '[qa] scrolling description passed');
   const videoPath = path.join(os.tmpdir(), `lets-listen-e2e-video-${randomUUID()}.mp4`);
   try {
     await run('ffmpeg', [
@@ -259,7 +259,6 @@ async function main() {
   }
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream-errors'], '[qa] stream error handling passed');
   await checkElectron(['--qa-demo', '--qa-archive-errors'], '[qa] archive failure warning passed');
-  await checkElectron(['--qa-live-exit'], '[qa] pending live session retried on quit');
   await checkElectron(['--qa-demo', '--qa-program', '--qa-stream', '--qa-keep-stream'],
     '[qa] stream container encoded', {
       timeoutMs: 45000,

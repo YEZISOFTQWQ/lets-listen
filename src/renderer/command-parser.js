@@ -18,7 +18,7 @@
     return digits.padStart(2, '0');
   }
 
-  function parseDanmaku(input, options = {}) {
+  function parseScore(input, options = {}) {
     const text = normalizeText(input);
     if (!text) return { type: 'empty', raw: text };
 
@@ -44,28 +44,8 @@
       return { type: 'score', roundId: currentRound, score, raw: text };
     }
 
-    match = text.match(/^#?\s*(?:TRACK|曲目|P|曲)?\s*(\d{1,3})\s*(?:评论|点评|评|comment|c)\s*[: ]?\s*(.+)$/i);
-    if (match) {
-      return { type: 'comment', roundId: normalizeRound(match[1]), comment: match[2].trim(), raw: text };
-    }
-
-    match = text.match(/^(?:评论|点评|评|comment|c)\s*[: ]?\s*(.+)$/i);
-    if (match) {
-      if (!currentRound) return { type: 'invalid', reason: '当前没有播放曲目', raw: text };
-      return { type: 'comment', roundId: currentRound, comment: match[1].trim(), raw: text };
-    }
-
-    match = text.match(/^#?\s*(?:TRACK|曲目|P|曲)?\s*(\d{1,3})\s+(.+)$/i);
-    if (match) {
-      return { type: 'comment', roundId: normalizeRound(match[1]), comment: match[2].trim(), raw: text };
-    }
-
-    if (options.unparsedAsComment && currentRound) {
-      return { type: 'comment', roundId: currentRound, comment: text, raw: text, implicit: true };
-    }
-
     return { type: 'ignored', raw: text };
   }
 
-  return { normalizeText, normalizeRound, parseDanmaku };
+  return { normalizeText, normalizeRound, parseScore };
 }));

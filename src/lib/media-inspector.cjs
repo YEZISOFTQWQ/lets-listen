@@ -14,6 +14,11 @@ const COVER_EXTENSIONS = {
   '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
 };
 
+function joinedTag(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string' && item.trim()).join(' / ');
+  return typeof value === 'string' ? value : '';
+}
+
 function matchesCoverSignature(data, mimeType) {
   if (mimeType === 'image/png') {
     return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
@@ -76,7 +81,9 @@ async function inspectMediaFiles(filePaths) {
         type,
         title: metadata.common?.title || path.basename(filePath, extension),
         artist: metadata.common?.artist || '',
-        submitter: metadata.common?.artist || '',
+        composer: joinedTag(metadata.common?.composer),
+        submitter: '',
+        genre: joinedTag(metadata.common?.genre),
         album: metadata.common?.album || '',
         duration: Number(metadata.format?.duration || 0),
         coverDataUrl,

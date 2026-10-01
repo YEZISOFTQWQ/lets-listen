@@ -1,26 +1,24 @@
 'use strict';
 
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, session } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { BilibiliLiveClient } = require('./lib/bilibili-client.cjs');
 const { ArchiveStore } = require('./lib/archive-store.cjs');
 const { StreamController, findFfmpeg } = require('./lib/stream-controller.cjs');
 const { inspectMediaFiles, readCoverFile, MAX_COVER_BYTES } = require('./lib/media-inspector.cjs');
+const { savePlaylistFile, loadPlaylistFile } = require('./lib/playlist-store.cjs');
 
 let mainWindow;
 let backstageWindow;
 let backstageState = {
   currentTrackId: '',
   tracks: [],
-  playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, commentOpacity: 72, programMode: false, unparsedAsComment: true },
-  connection: { status: 'disconnected', message: '模拟弹幕模式', canDisconnect: false },
+  themeAccent: '#d8ff3e',
+  themeHover: '#e5ff72',
+  playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, commentOpacity: 72, programMode: false },
   sessionId: '',
 };
-let liveClient;
-let liveOperation;
-let shutdownCleanupStarted = false;
 let archiveStore;
 const streamController = new StreamController();
 let activeCaptureId = '';
@@ -31,60 +29,6 @@ function sendToRenderer(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
-}
-
-function configPath() {
-  return path.join(app.getPath('userData'), 'config.json');
-}
-
-function encryptSecret(value) {
-  if (!value) return '';
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('当前系统无法安全保存 access_secret，请检查 Windows 凭据服务');
-  }
-  return safeStorage.encryptString(value).toString('base64');
-}
-
-function decryptSecret(value) {
-  if (!value || !safeStorage.isEncryptionAvailable()) return '';
-  try {
-    return safeStorage.decryptString(Buffer.from(value, 'base64'));
-  } catch {
-    return '';
-  }
-}
-
-async function readStoredConfig(includeSecret = false) {
-  try {
-    const raw = JSON.parse(await fs.readFile(configPath(), 'utf8'));
-    const secret = decryptSecret(raw.accessSecretEncrypted);
-    const result = {
-      appId: raw.appId || '',
-      accessKey: raw.accessKey || '',
-      hasSecret: Boolean(secret),
-    };
-    if (includeSecret) result.accessSecret = secret;
-    return result;
-  } catch {
-    return { appId: '', accessKey: '', accessSecret: '', hasSecret: false };
-  }
-}
-
-async function writeStoredConfig(input) {
-  const previous = await readStoredConfig(true);
-  const secret = String(input.accessSecret || '').trim() || previous.accessSecret;
-  const config = {
-    appId: String(input.appId || '').trim(),
-    accessKey: String(input.accessKey || '').trim(),
-    accessSecretEncrypted: encryptSecret(secret),
-  };
-  await fs.mkdir(app.getPath('userData'), { recursive: true });
-  await fs.writeFile(configPath(), JSON.stringify(config, null, 2), 'utf8');
-  return {
-    appId: config.appId,
-    accessKey: config.accessKey,
-    hasSecret: Boolean(secret),
-  };
 }
 
 function openBackstageWindow() {
@@ -190,8 +134,7 @@ function createWindow() {
   const qaStreamErrors = process.argv.includes('--qa-stream-errors');
   const qaRealVideo = process.argv.includes('--qa-real-video');
   const qaRealAudio = process.argv.includes('--qa-real-audio');
-  const qaLiveExit = process.argv.includes('--qa-live-exit');
-  const qaComments = process.argv.includes('--qa-comments');
+  const qaScrollingDescription = process.argv.includes('--qa-scrolling-description');
   const qaArchiveErrors = process.argv.includes('--qa-archive-errors');
   mainWindow.loadFile(
     path.join(__dirname, 'renderer', 'index.html'),
@@ -217,74 +160,45 @@ function createWindow() {
         }
       }, qaDemo ? 1800 : 1200);
     });
-  } else if (qaComments) {
+  } else if (qaScrollingDescription) {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
           const result = await mainWindow.webContents.executeJavaScript(`(() => {
-            for (let index = 0; index < 24; index += 1) {
-              processDanmaku({ open_id: 'qa-comment-' + index, uname: '观众' + index,
-                msg: '#01评 第' + index + '条乐评，旋律和节奏都很有趣', msg_id: 'qa-comment-msg-' + index }, 'mock');
-            }
-            const normal = document.getElementById('commentStream').children.length;
             document.body.classList.add('program-mode');
-            renderComments();
-            const stream = document.getElementById('commentStream');
-            renderComments();
-            const stable = [...stream.querySelectorAll('.comment-item')]
-              .every((item) => getComputedStyle(item).animationName === 'none');
-            processDanmaku({ open_id: 'qa-comment-new', uname: '新观众',
-              msg: '#01评 新来的乐评', msg_id: 'qa-comment-new' }, 'mock');
-            const entering = getComputedStyle(stream.querySelector('[data-message-id="qa-comment-new"]'))
-              .animationName === 'comment-enter';
-            const unchanged = [...stream.querySelectorAll('.comment-item')]
-              .filter((item) => item.dataset.messageId !== 'qa-comment-new')
-              .every((item) => getComputedStyle(item).animationName === 'none');
-            return { normal, fullscreen: stream.children.length,
-              clientHeight: stream.clientHeight, scrollHeight: stream.scrollHeight,
-              stable, entering, unchanged,
+            const track = state.tracks[0];
+            track.description = '这是一段用于验证滚动能力的歌曲简介。'.repeat(40).slice(0, 500);
+            track.descriptionVisible = true;
+            renderTrackDescription();
+            const card = document.getElementById('descriptionCard');
+            const scroll = document.getElementById('descriptionScroll');
+            scroll.scrollTop = scroll.scrollHeight;
+            return { text: scroll.textContent, hidden: card.hidden,
+              scrollTop: scroll.scrollTop, clientHeight: scroll.clientHeight,
+              scrollHeight: scroll.scrollHeight, overflow: getComputedStyle(scroll).overflowY,
+              oldCard: document.getElementById('trackDescriptionCard'),
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
-              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
-              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
-              instructionsHidden: getComputedStyle(document.querySelector('.instruction-strip')).display === 'none',
-              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none' };
+              trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
+              coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
+              scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
+              descriptionVisible: getComputedStyle(card).display !== 'none' };
           })()`);
-          if (result.fullscreen <= result.normal || result.fullscreen <= 4
-            || !result.stable || !result.entering || !result.unchanged
-            || result.scrollHeight > result.clientHeight + 2) {
-            throw new Error(`全屏乐评未扩容或溢出: ${JSON.stringify(result)}`);
+          if (!result.text.startsWith('这是一段') || result.hidden || result.oldCard
+            || result.overflow !== 'auto' || result.scrollHeight <= result.clientHeight
+            || result.scrollTop <= 0) {
+            throw new Error(`简介区未能滚动: ${JSON.stringify(result)}`);
           }
-          if (qaVideo && (!result.videoMode || !result.trackHidden || !result.scoreHidden
-            || !result.instructionsHidden || !result.commentsVisible)) {
-            throw new Error(`视频模式未只保留评论栏: ${JSON.stringify(result)}`);
+          if (qaVideo && (!result.videoMode || !result.trackVisible || !result.coverHidden || !result.scoreVisible
+            || !result.descriptionVisible)) {
+            throw new Error(`视频模式叠层布局错误: ${JSON.stringify(result)}`);
           }
-          console.log(`[qa] fullscreen comments passed (${result.normal} -> ${result.fullscreen})`);
+          console.log('[qa] scrolling description passed');
           app.quit();
         } catch (error) {
-          console.error(`[qa] fullscreen comments failed: ${error.message}`);
+          console.error(`[qa] scrolling description failed: ${error.message}`);
           app.exit(1);
         }
       }, qaDemo ? 1800 : 1200);
-    });
-  } else if (qaLiveExit) {
-    mainWindow.webContents.once('did-finish-load', () => {
-      setTimeout(() => {
-        let stopCount = 0;
-        liveClient = {
-          gameId: 'qa-pending-session',
-          closedByUser: true,
-          async stop() { stopCount += 1; this.gameId = ''; },
-          removeAllListeners() {},
-        };
-        app.once('will-quit', () => {
-          if (stopCount === 1) console.log('[qa] pending live session retried on quit');
-          else {
-            console.error(`[qa] live exit cleanup failed: stopCount=${stopCount}`);
-            process.exitCode = 1;
-          }
-        });
-        app.quit();
-      }, 1200);
     });
   } else if (qaRealAudio) {
     mainWindow.webContents.once('did-finish-load', () => {
@@ -339,9 +253,10 @@ function createWindow() {
           const result = await mainWindow.webContents.executeJavaScript(`(async () => {
             document.body.classList.add('program-mode');
             setCommentOpacity(46, false);
-            processDanmaku({ open_id: 'qa-video-viewer', uname: '视频观众',
-              msg: '#01评 视频画面清楚', msg_id: 'qa-video-comment' }, 'mock');
             await loadTrack(0, true);
+            state.tracks[0].description = '视频画面中的歌曲简介';
+            state.tracks[0].descriptionVisible = true;
+            renderTrackDescription();
             await new Promise((resolve) => setTimeout(resolve, 650));
             const media = document.getElementById('mediaElement');
             return {
@@ -349,21 +264,21 @@ function createWindow() {
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
               videoVisible: getComputedStyle(media).display !== 'none',
               ambientHidden: getComputedStyle(document.querySelector('.ambient')).display === 'none',
-              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
-              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
-              instructionsHidden: getComputedStyle(document.querySelector('.instruction-strip')).display === 'none',
-              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none',
+              trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
+              coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
+              scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
+              descriptionVisible: getComputedStyle(document.querySelector('.description-card')).display !== 'none',
               controlsHidden: getComputedStyle(document.querySelector('.control-surface')).display === 'none',
-              comment: document.getElementById('commentStream').textContent,
+              description: document.getElementById('descriptionScroll').textContent,
               opacity: getComputedStyle(document.documentElement).getPropertyValue('--comment-panel-alpha').trim(),
             };
           })()`);
           if (result.paused || result.time <= 0 || result.width < 640 || result.height < 360
             || !result.videoMode || !result.videoVisible || !result.ambientHidden
-            || !result.trackHidden || !result.scoreHidden
-            || !result.instructionsHidden || !result.commentsVisible
+             || !result.trackVisible || !result.coverHidden || !result.scoreVisible
+            || !result.descriptionVisible
             || !result.controlsHidden
-            || !result.comment.includes('视频画面清楚') || result.opacity !== '0.46') {
+            || result.description !== '视频画面中的歌曲简介' || result.opacity !== '0.46') {
             throw new Error(`真实视频播放或节目布局错误：${JSON.stringify(result)}`);
           }
           console.log('[qa] real video import and playback passed');
@@ -456,8 +371,9 @@ function createWindow() {
             await mainWindow.webContents.executeJavaScript(`(async () => {
               await addTracks(${JSON.stringify(inspected)});
               setCommentOpacity(46, false);
-              processDanmaku({ open_id: 'qa-stream-video-viewer', uname: '视频观众',
-                msg: '#01评 视频推流评论', msg_id: 'qa-stream-video-comment' }, 'mock');
+              state.tracks[0].description = '视频推流简介';
+              state.tracks[0].descriptionVisible = true;
+              renderTrackDescription();
             })()`);
           }
           const playing = await mainWindow.webContents.executeJavaScript(`(async () => {
@@ -473,14 +389,15 @@ function createWindow() {
               width: document.getElementById('mediaElement').videoWidth,
               height: document.getElementById('mediaElement').videoHeight,
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
-              trackHidden: getComputedStyle(document.querySelector('.track-zone')).display === 'none',
-              scoreHidden: getComputedStyle(document.querySelector('.score-card')).display === 'none',
-              commentsVisible: getComputedStyle(document.querySelector('.comments-card')).display !== 'none',
-              comment: document.getElementById('commentStream').textContent,
+               trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
+               coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
+               scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
+              descriptionVisible: getComputedStyle(document.querySelector('.description-card')).display !== 'none',
+              description: document.getElementById('descriptionScroll').textContent,
             }))()`);
             if (video.width < 640 || video.height < 360 || !video.videoMode
-              || !video.trackHidden || !video.scoreHidden || !video.commentsVisible
-              || !video.comment.includes('视频推流评论')) {
+               || !video.trackVisible || !video.coverHidden || !video.scoreVisible || !video.descriptionVisible
+              || video.description !== '视频推流简介') {
               throw new Error(`推流视频模式异常：${JSON.stringify(video)}`);
             }
           }
@@ -552,19 +469,19 @@ function createWindow() {
           await mainWindow.webContents.executeJavaScript('state.archiveQueue');
           const sessionId = backstageState.sessionId;
           if (!sessionId) throw new Error('未创建测试存档');
-          archiveStore.append = (id, entry) => entry?.type === 'comment' && entry.msgId === 'qa-archive-fail'
+          archiveStore.append = (id, entry) => entry?.type === 'score' && entry.msgId === 'qa-archive-fail'
             ? Promise.reject(new Error('QA 模拟磁盘写入失败'))
             : originalAppend.call(archiveStore, id, entry);
           const observed = await mainWindow.webContents.executeJavaScript(`(async () => {
-            processDanmaku({ open_id: 'qa-archive-viewer', uname: '存档测试观众',
-              msg: '#01评 这条评论的归档将失败', msg_id: 'qa-archive-fail' }, 'mock');
+            processScoreInput({ open_id: 'qa-archive-viewer', uname: '存档测试观众',
+              msg: '#01 8.1', msg_id: 'qa-archive-fail' });
             await state.archiveQueue;
             return { error: state.archiveError,
-              visible: document.getElementById('commentStream').textContent,
+              score: state.scoresByRound.get('01')?.get('qa-archive-viewer')?.score,
               toast: document.getElementById('toastContainer').textContent };
           })()`);
           if (!observed.error.includes('QA 模拟磁盘写入失败')
-            || !observed.visible.includes('这条评论的归档将失败')
+            || observed.score !== 8.1
             || !observed.toast.includes('存档写入失败')) {
             throw new Error(`存档失败未向节目提示：${JSON.stringify(observed)}`);
           }
@@ -621,9 +538,9 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const shown = await mainWindow.webContents.executeJavaScript(`({
             label: document.querySelector('.track-pill')?.textContent.trim(),
-            text: document.getElementById('trackDescriptionText')?.textContent,
-            cardText: document.getElementById('trackDescriptionCard')?.textContent.trim(),
-            hidden: document.getElementById('trackDescriptionCard')?.hidden
+            text: document.getElementById('descriptionScroll')?.textContent,
+            cardText: document.getElementById('descriptionCard')?.textContent.trim(),
+            hidden: document.getElementById('descriptionCard')?.hidden
           })`);
           if (!shown.label?.startsWith('TRACK') || shown.text !== '后台实时修改的歌曲简介'
             || shown.cardText !== shown.text || shown.hidden) {
@@ -633,12 +550,11 @@ function createWindow() {
             mainWindow.setSize(1120, 720);
             await new Promise((resolve) => setTimeout(resolve, 250));
             const layout = await mainWindow.webContents.executeJavaScript(`(() => {
-              const zone = document.querySelector('.track-zone').getBoundingClientRect();
-              const title = document.querySelector('.now-playing').getBoundingClientRect();
-              const card = document.getElementById('trackDescriptionCard').getBoundingClientRect();
-              return { zoneBottom: zone.bottom, titleBottom: title.bottom, cardTop: card.top, cardBottom: card.bottom };
+              const zone = document.querySelector('.interaction-zone').getBoundingClientRect();
+              const card = document.getElementById('descriptionCard').getBoundingClientRect();
+              return { zoneTop: zone.top, zoneBottom: zone.bottom, cardTop: card.top, cardBottom: card.bottom };
             })()`);
-            if (layout.cardTop < layout.titleBottom - 1 || layout.cardBottom > layout.zoneBottom + 1) {
+            if (layout.cardTop < layout.zoneTop - 1 || layout.cardBottom > layout.zoneBottom + 1) {
               throw new Error(`最小窗口下简介布局溢出: ${JSON.stringify(layout)}`);
             }
           }
@@ -649,14 +565,13 @@ function createWindow() {
           })()`);
           await new Promise((resolve) => setTimeout(resolve, 500));
           const hidden = await mainWindow.webContents.executeJavaScript(
-            `document.getElementById('trackDescriptionCard').hidden`,
+            `document.getElementById('descriptionCard').hidden`,
           );
           if (!hidden) throw new Error('后台关闭简介后节目画面仍在展示');
           await backstageWindow.webContents.executeJavaScript(`(async () => {
             await window.backstageApi.command('volume', { value: 0.35 });
             await window.backstageApi.command('comment-opacity', { value: 47 });
-            await window.backstageApi.command('unparsed-as-comment', { value: false });
-            await window.backstageApi.command('mock-danmaku', { name: '后台观众', message: '#01 8.3' });
+            await window.backstageApi.command('submit-score', { name: '后台观众', message: '#01 8.3' });
             await window.backstageApi.command('import', { items: [{
               id: 'qa-imported-track', path: 'qa-imported.wav', url: 'file:///qa-imported.wav',
               type: 'audio', title: '后台导入曲目', artist: '', duration: 0, coverDataUrl: ''
@@ -664,15 +579,14 @@ function createWindow() {
           })()`);
           await new Promise((resolve) => setTimeout(resolve, 500));
           const controls = await mainWindow.webContents.executeJavaScript(`({
-            volume: document.getElementById('mediaElement').volume,
+            volume: Number(document.getElementById('volumeInput').value),
             opacity: Number(document.getElementById('commentOpacityInput').value),
-            unparsed: document.getElementById('unparsedCommentInput').checked,
             playlistCount: document.querySelectorAll('.playlist-item').length,
-            comments: document.getElementById('commentStream').textContent
+            score: [...state.scoresByRound.get('01').values()].find((entry) => entry.uname === '后台观众')?.score
           })`);
           if (Math.abs(controls.volume - 0.35) > 0.01
             || controls.opacity !== 47
-            || controls.unparsed || controls.playlistCount !== 2 || !controls.comments.includes('8.3')) {
+            || controls.playlistCount !== 2 || controls.score !== 8.3) {
             throw new Error(`后台控制未同步到节目: ${JSON.stringify(controls)}`);
           }
           await mainWindow.webContents.executeJavaScript(
@@ -720,19 +634,25 @@ function createWindow() {
           await backstageWindow.webContents.executeJavaScript(`(() => {
             const title = document.getElementById('titleInput');
             const submitter = document.getElementById('submitterInput');
+            const genre = document.getElementById('genreInput');
             title.value = '后台更新的曲名';
             submitter.value = '后台投稿人';
+            genre.value = '电子';
             title.dispatchEvent(new Event('input', { bubbles: true }));
             submitter.dispatchEvent(new Event('input', { bubbles: true }));
+            genre.dispatchEvent(new Event('input', { bubbles: true }));
             document.getElementById('saveButton').click();
           })()`);
           await new Promise((resolve) => setTimeout(resolve, 300));
           const metadata = await mainWindow.webContents.executeJavaScript(`({
             title: document.getElementById('trackTitle').textContent,
-            submitter: document.getElementById('trackArtist').textContent,
+            submitter: document.getElementById('trackSubmitter').textContent,
+            genre: document.getElementById('trackGenre').textContent,
+            creator: document.getElementById('trackArtist').textContent,
             playlistTitle: document.querySelector('.playlist-item strong')?.textContent,
           })`);
           if (metadata.title !== '后台更新的曲名' || metadata.submitter !== '后台投稿人'
+            || metadata.genre !== '电子' || metadata.creator !== '艺人：The Afterglow'
             || metadata.playlistTitle !== '后台更新的曲名') {
             throw new Error(`后台曲目信息未同步: ${JSON.stringify(metadata)}`);
           }
@@ -934,23 +854,21 @@ function createWindow() {
             throw new Error('后台导入的封面没有同步到节目画面');
           }
           const revisedScore = await mainWindow.webContents.executeJavaScript(`(() => {
-            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 5.0', msg_id: 'qa-repeat-1' }, 'mock');
-            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 9.0', msg_id: 'qa-repeat-2' }, 'mock');
-            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 1.0', msg_id: 'qa-repeat-2' }, 'mock');
-            processDanmaku({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#02 6.0', msg_id: 'qa-repeat-3' }, 'mock');
+            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 5.0', msg_id: 'qa-repeat-1' });
+            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 9.0', msg_id: 'qa-repeat-2' });
+            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 1.0', msg_id: 'qa-repeat-2' });
+            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#02 6.0', msg_id: 'qa-repeat-3' });
             return {
-              bubbles: state.comments.filter((entry) => entry.kind === 'score' && entry.openId === 'qa-repeat').length,
               score: state.scoresByRound.get('01')?.get('qa-repeat')?.score,
               otherTrackScore: state.scoresByRound.get('02')?.get('qa-repeat')?.score,
-              count: document.getElementById('scoreCount').textContent,
+              count: state.scoresByRound.get('01')?.size,
               average: document.getElementById('averageScore').textContent,
-              visible: document.getElementById('commentStream').textContent,
+              visible: document.querySelector('.score-card').textContent.trim(),
             };
           })()`);
-          if (revisedScore.bubbles !== 2 || revisedScore.score !== 9 || revisedScore.otherTrackScore !== 6
-            || revisedScore.count !== '5' || revisedScore.average !== '8.7'
-            || revisedScore.visible.includes('5.0 分') || revisedScore.visible.includes('6.0 分')
-            || revisedScore.visible.includes('1.0 分') || !revisedScore.visible.includes('9.0 分')) {
+          if (revisedScore.score !== 9 || revisedScore.otherTrackScore !== 6
+            || revisedScore.count !== 5 || revisedScore.average !== '8.7'
+            || revisedScore.visible !== '8.7') {
             throw new Error(`重复评分未覆盖旧消息: ${JSON.stringify(revisedScore)}`);
           }
           const exportPath = path.join(app.getPath('temp'), `lets-listen-export-qa-${randomUUID()}.csv`);
@@ -1001,8 +919,8 @@ function createWindow() {
             paused: document.getElementById('mediaElement').paused,
             toast: document.getElementById('toastContainer').textContent,
             title: document.getElementById('trackTitle').textContent,
-            submitter: document.getElementById('trackArtist').textContent,
-            description: document.getElementById('trackDescriptionText').textContent,
+            submitter: document.getElementById('trackSubmitter').textContent,
+            description: document.getElementById('descriptionScroll').textContent,
             cover: document.getElementById('coverImage').getAttribute('src'),
           })`);
           if (badMedia.index !== 1 || !badMedia.paused
@@ -1119,21 +1037,6 @@ function createWindow() {
           if (!backstageError.error || !backstageError.message.includes('曲目已不存在')) {
             throw new Error(`后台误操作未收到错误提示：${JSON.stringify(backstageError)}`);
           }
-          sendToRenderer('live:state', {
-            status: 'error', message: '关闭互动场次失败，请重试', gameId: 'qa-retry-game',
-          });
-          await new Promise((resolve) => setTimeout(resolve, 150));
-          const retryButtons = {
-            main: await mainWindow.webContents.executeJavaScript(
-              `document.getElementById('disconnectButton').disabled`,
-            ),
-            backstage: await backstageWindow.webContents.executeJavaScript(
-              `document.getElementById('disconnectButton').disabled`,
-            ),
-          };
-          if (retryButtons.main || retryButtons.backstage) {
-            throw new Error(`结束接口失败后无法重新断开：${JSON.stringify(retryButtons)}`);
-          }
           if (qaProgram) {
             const previousBackstage = backstageWindow;
             const closed = new Promise((resolve) => previousBackstage.once('closed', resolve));
@@ -1167,22 +1070,6 @@ function createWindow() {
   }
 }
 
-function attachLiveClient(client) {
-  client.on('state', (payload) => sendToRenderer('live:state', payload));
-  client.on('message', (payload) => sendToRenderer('live:message', payload));
-  client.on('diagnostic', (payload) => sendToRenderer('live:diagnostic', payload));
-}
-
-function runLiveOperation(work) {
-  if (liveOperation) throw new Error('直播连接操作正在进行，请稍后重试');
-  const operation = Promise.resolve().then(work);
-  liveOperation = operation;
-  operation.finally(() => {
-    if (liveOperation === operation) liveOperation = null;
-  }).catch(() => {});
-  return operation;
-}
-
 function registerIpc() {
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), dataPath: app.getPath('userData') }));
   ipcMain.handle('backstage:open', (event) => {
@@ -1198,16 +1085,21 @@ function registerIpc() {
     if (event.sender !== mainWindow?.webContents) throw new Error('无权发布后台状态');
     backstageState = {
       currentTrackId: String(snapshot?.currentTrackId || ''),
+      themeAccent: /^#[0-9a-f]{6}$/i.test(snapshot?.themeAccent) ? snapshot.themeAccent : '#d8ff3e',
+      themeHover: /^#[0-9a-f]{6}$/i.test(snapshot?.themeHover) ? snapshot.themeHover : '#e5ff72',
       tracks: (Array.isArray(snapshot?.tracks) ? snapshot.tracks : []).slice(0, 500).map((track) => ({
         id: String(track.id || ''),
         number: String(track.number || ''),
         title: String(track.title || ''),
+        artist: String(track.artist || ''),
+        composer: String(track.composer || ''),
         submitter: String(track.submitter || ''),
+        genre: String(track.genre || ''),
         hasCover: Boolean(track.hasCover),
         coverPath: String(track.coverPath || ''),
         duration: Number(track.duration || 0),
         type: track.type === 'video' ? 'video' : 'audio',
-        description: String(track.description || '').slice(0, 500),
+        description: String(track.description || ''),
         descriptionVisible: Boolean(track.descriptionVisible),
       })),
       playback: {
@@ -1217,12 +1109,6 @@ function registerIpc() {
         volume: Number(snapshot?.playback?.volume ?? 0.85),
         commentOpacity: Number(snapshot?.playback?.commentOpacity ?? 72),
         programMode: Boolean(snapshot?.playback?.programMode),
-        unparsedAsComment: Boolean(snapshot?.playback?.unparsedAsComment),
-      },
-      connection: {
-        status: String(snapshot?.connection?.status || 'disconnected'),
-        message: String(snapshot?.connection?.message || ''),
-        canDisconnect: Boolean(snapshot?.connection?.canDisconnect),
       },
       sessionId: String(snapshot?.sessionId || ''),
     };
@@ -1244,8 +1130,10 @@ function registerIpc() {
       if (!title) throw new Error('曲目名称不能为空');
       patch.title = title;
     }
+    if (typeof update.composer === 'string') patch.composer = update.composer.trim().slice(0, 80);
     if (typeof update.submitter === 'string') patch.submitter = update.submitter.trim().slice(0, 80);
-    if (typeof update.description === 'string') patch.description = update.description.trim().slice(0, 500);
+    if (typeof update.genre === 'string') patch.genre = update.genre.trim().slice(0, 80);
+    if (typeof update.description === 'string') patch.description = update.description.trim();
     if (typeof update.descriptionVisible === 'boolean') patch.descriptionVisible = update.descriptionVisible;
     if (typeof update.coverDataUrl === 'string') {
       if (update.coverDataUrl.length > Math.ceil(MAX_COVER_BYTES * 4 / 3) + 100) {
@@ -1265,7 +1153,7 @@ function registerIpc() {
     if (event.sender !== backstageWindow?.webContents) throw new Error('无权操作节目');
     const allowed = new Set([
       'import', 'select-track', 'play-pause', 'previous', 'next', 'seek', 'volume',
-      'comment-opacity', 'mock-danmaku', 'unparsed-as-comment', 'leave-program',
+      'comment-opacity', 'submit-score', 'leave-program', 'save-playlist', 'open-playlist',
     ]);
     if (!allowed.has(command?.type)) throw new Error('不支持的后台操作');
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('节目窗口已关闭');
@@ -1297,6 +1185,44 @@ function registerIpc() {
   });
 
   ipcMain.handle('media:inspect', (_event, paths) => inspectMediaFiles(paths));
+  ipcMain.handle('playlist:save', async (event, snapshot) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('无权保存歌单');
+    if (!Array.isArray(snapshot?.tracks) || !snapshot.tracks.length) throw new Error('请先导入曲目再保存歌单');
+    const owner = backstageWindow && !backstageWindow.isDestroyed() && backstageWindow.isVisible()
+      ? backstageWindow : dialogOwner(event);
+    const result = await dialog.showSaveDialog(owner, {
+      title: '保存 lets-listen 歌单',
+      defaultPath: `lets-listen-歌单-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'lets-listen 歌单', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    return savePlaylistFile(result.filePath, snapshot);
+  });
+  ipcMain.handle('playlist:open', async (event) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('无权导入歌单');
+    const owner = backstageWindow && !backstageWindow.isDestroyed() && backstageWindow.isVisible()
+      ? backstageWindow : dialogOwner(event);
+    const selected = await dialog.showOpenDialog(owner, {
+      title: '导入 lets-listen 歌单',
+      properties: ['openFile'],
+      filters: [{ name: 'lets-listen 歌单', extensions: ['json'] }],
+    });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    const loaded = await loadPlaylistFile(selected.filePaths[0]);
+    if (backstageState.tracks.length || loaded.missing.length) {
+      const detail = [
+        backstageState.tracks.length ? `当前 ${backstageState.tracks.length} 首曲目会被替换；本场评分不会恢复。` : '',
+        loaded.missing.length ? `有 ${loaded.missing.length} 首媒体无法读取，将跳过：${loaded.missing.slice(0, 3).join('、')}${loaded.missing.length > 3 ? '…' : ''}` : '',
+        `可导入 ${loaded.tracks.length} 首曲目。`,
+      ].filter(Boolean).join('\n');
+      const answer = await dialog.showMessageBox(owner, {
+        type: 'question', title: '确认导入歌单', message: '要导入这个歌单吗？', detail,
+        buttons: ['取消', '导入并替换'], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      if (answer.response !== 1) return null;
+    }
+    return loaded;
+  });
   ipcMain.handle('media:select-cover', async (event) => {
     const result = await dialog.showOpenDialog(dialogOwner(event), {
       title: '选择曲目封面',
@@ -1306,47 +1232,12 @@ function registerIpc() {
     if (result.canceled || !result.filePaths[0]) return null;
     return readCoverFile(result.filePaths[0]);
   });
-  ipcMain.handle('config:get', () => readStoredConfig(false));
-  ipcMain.handle('config:save', (_event, config) => writeStoredConfig(config));
-
-  ipcMain.handle('live:connect', (_event, identityCode) => runLiveOperation(async () => {
-    if (liveClient) {
-      const previous = liveClient;
-      await previous.stop();
-      previous.removeAllListeners();
-      if (liveClient === previous) liveClient = null;
-    }
-    const config = await readStoredConfig(true);
-    const client = new BilibiliLiveClient(config);
-    liveClient = client;
-    attachLiveClient(client);
-    try {
-      return await client.start(identityCode);
-    } catch (error) {
-      if (!client.gameId) {
-        if (liveClient === client) liveClient = null;
-        client.removeAllListeners();
-      }
-      sendToRenderer('live:state', { status: 'error', message: error.message, gameId: client.gameId || null });
-      throw error;
-    }
-  }));
-
-  ipcMain.handle('live:disconnect', () => runLiveOperation(async () => {
-    if (!liveClient) return { ok: true };
-    const client = liveClient;
-    await client.stop();
-    client.removeAllListeners();
-    if (liveClient === client) liveClient = null;
-    return { ok: true };
-  }));
-
   ipcMain.handle('archive:start', (_event, metadata) => archiveStore.startSession(metadata));
   ipcMain.handle('archive:append', (_event, sessionId, entry) => archiveStore.append(sessionId, entry));
   ipcMain.handle('archive:finish', (_event, sessionId, summary) => archiveStore.finishSession(sessionId, summary));
   ipcMain.handle('archive:export-csv', async (event, sessionId) => {
     const result = await dialog.showSaveDialog(dialogOwner(event), {
-      title: '导出评论与评分',
+      title: '导出评分存档',
       defaultPath: `品味大战-${new Date().toISOString().slice(0, 10)}.csv`,
       filters: [{ name: 'CSV 表格', extensions: ['csv'] }],
     });
@@ -1462,15 +1353,6 @@ app.on('before-quit', (event) => {
   if (streamController.starting || streamController.child) {
     streamController.abort('软件退出，推流结束');
   }
-  if (shutdownCleanupStarted || ((!liveClient || !liveClient.gameId) && !liveOperation)) return;
-  event.preventDefault();
-  shutdownCleanupStarted = true;
-  Promise.resolve(liveOperation).catch(() => {}).then(async () => {
-    const client = liveClient;
-    if (client?.gameId) await client.stop().catch(() => {});
-    client?.removeAllListeners();
-    liveClient = null;
-  }).finally(() => app.quit());
 });
 
 app.on('window-all-closed', () => {
