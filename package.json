@@ -1,7 +1,7 @@
 {
   "name": "lets-listen",
   "version": "0.1.0",
-  "description": "品味大战：面向哔哩哔哩直播的本地媒体播放、弹幕评论与多人评分工具",
+  "description": "品味大战：面向直播的本地媒体播放、歌曲简介与多人评分工具",
   "author": "Taste Arena",
   "repository": {
     "type": "git",
@@ -17,8 +17,9 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test",
-    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/backstage-preload.cjs && node --check src/lib/bili-protocol.cjs && node --check src/lib/bilibili-client.cjs && node --check src/lib/archive-store.cjs && node --check src/lib/stream-controller.cjs && node --check src/renderer/command-parser.js && node --check src/renderer/app.js && node --check src/renderer/backstage.js",
-    "dist": "electron-builder --win dir"
+    "test:e2e": "node scripts/e2e.cjs",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/backstage-preload.cjs && node --check src/lib/archive-store.cjs && node --check src/lib/media-inspector.cjs && node --check src/lib/playlist-store.cjs && node --check src/lib/stream-controller.cjs && node --check src/renderer/command-parser.js && node --check src/renderer/cover-validation.js && node --check src/renderer/app.js && node --check src/renderer/backstage.js && node --check scripts/e2e.cjs",
+    "dist": "electron-builder --win dir --config.electronDist=node_modules/electron/dist"
   },
   "dependencies": {
     "music-metadata": "^11.8.3"

@@ -2,25 +2,26 @@
 
 const api = window.backstageApi;
 const ids = [
-  'trackCount', 'importButton', 'exportButton', 'playlist', 'exitProgramButton',
+  'trackCount', 'importButton', 'openPlaylistButton', 'savePlaylistButton', 'exportButton', 'playlist', 'exitProgramButton',
   'previousButton', 'playButton', 'nextButton', 'playingLabel', 'currentTime',
   'progressInput', 'durationTime', 'volumeInput', 'volumeValue',
   'commentOpacityInput', 'commentOpacityValue', 'trackSelect', 'currentIndicator',
-  'titleInput', 'submitterInput', 'coverState', 'chooseCoverButton', 'clearCoverButton',
-  'descriptionInput', 'visibleInput', 'videoNotice', 'saveButton', 'mockNameInput',
-  'mockMessageInput', 'sendMockButton', 'unparsedInput', 'connectionStatus',
-  'appIdInput', 'accessKeyInput', 'accessSecretInput', 'secretState',
-  'identityCodeInput', 'saveConfigButton', 'connectButton', 'disconnectButton', 'status',
+  'titleInput', 'composerInput', 'submitterInput', 'genreInput', 'coverState', 'chooseCoverButton', 'clearCoverButton',
+  'descriptionInput', 'visibleInput', 'saveButton', 'mockNameInput',
+  'mockMessageInput', 'sendMockButton', 'status',
   'streamStatus', 'ffmpegPathInput', 'ffmpegStatus', 'streamQualityInput',
   'streamServerInput', 'streamKeyInput', 'streamTestButton', 'streamStartButton', 'streamStopButton',
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
-let snapshot = { currentTrackId: '', tracks: [], playback: {}, connection: {}, sessionId: '' };
+let snapshot = { currentTrackId: '', tracks: [], playback: {}, sessionId: '' };
 let selectedId = '';
 let dirty = false;
 let pendingCover = null;
+let coverSelectionRevision = 0;
+let editRevision = 0;
 let playlistSignature = '';
 let dragDepth = 0;
+let themeSignature = '';
 
 function formatTime(value) {
   const seconds = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -36,6 +37,18 @@ function setStatus(message, error = false) {
   elements.status.classList.toggle('error', error);
 }
 
+function renderTheme(accent, hover) {
+  const color = /^#[0-9a-f]{6}$/i.test(accent) ? accent : '#d8ff3e';
+  const hoverColor = /^#[0-9a-f]{6}$/i.test(hover) ? hover : '#e5ff72';
+  const signature = `${color}:${hoverColor}`;
+  if (signature === themeSignature) return;
+  themeSignature = signature;
+  const root = document.documentElement.style;
+  root.setProperty('--acid', color);
+  root.setProperty('--accent-hover', hoverColor);
+  root.setProperty('--accent-rgb', [1, 3, 5].map((index) => parseInt(color.slice(index, index + 2), 16)).join(', '));
+}
+
 async function command(type, payload) {
   try {
     await api.command(type, payload);
@@ -45,8 +58,9 @@ async function command(type, payload) {
 }
 
 function renderPlaylist() {
+  elements.savePlaylistButton.disabled = snapshot.tracks.length === 0;
   const signature = snapshot.tracks.map((track) =>
-    [track.id, track.number, track.title, track.submitter, track.duration].join(':')
+    [track.id, track.number, track.title, track.composer, track.artist, track.duration].join(':')
   ).join('|') + `|${snapshot.currentTrackId}`;
   if (signature === playlistSignature) return;
   playlistSignature = signature;
@@ -70,7 +84,7 @@ function renderPlaylist() {
     const title = document.createElement('strong');
     title.textContent = track.title;
     const submitter = document.createElement('small');
-    submitter.textContent = track.submitter || (track.type === 'video' ? '视频文件' : '未知投稿人');
+    submitter.textContent = track.composer || track.artist || (track.type === 'video' ? '视频文件' : '未标注艺人');
     copy.append(title, submitter);
     const duration = document.createElement('span');
     duration.className = 'playlist-duration';
@@ -84,17 +98,18 @@ function renderPlaylist() {
 function renderSelected(force = false) {
   const track = selectedTrack();
   const available = Boolean(track);
-  for (const id of ['titleInput', 'submitterInput', 'descriptionInput', 'chooseCoverButton', 'clearCoverButton', 'saveButton']) {
+  for (const id of ['titleInput', 'composerInput', 'submitterInput', 'genreInput', 'descriptionInput', 'chooseCoverButton', 'clearCoverButton', 'saveButton']) {
     elements[id].disabled = !available;
   }
-  elements.visibleInput.disabled = !available || track.type === 'video';
+  elements.visibleInput.disabled = !available;
   elements.currentIndicator.textContent = !track
     ? '请先导入音频或视频'
     : track.id === snapshot.currentTrackId ? '当前播放曲目' : '队列中的其他曲目，切换播放后生效';
-  elements.videoNotice.textContent = track?.type === 'video' ? '视频模式只显示评论栏' : '';
   if (force || !dirty) {
     elements.titleInput.value = track?.title || '';
+    elements.composerInput.value = track?.composer || '';
     elements.submitterInput.value = track?.submitter || '';
+    elements.genreInput.value = track?.genre || '';
     elements.descriptionInput.value = track?.description || '';
     elements.visibleInput.checked = Boolean(track?.descriptionVisible);
     elements.coverState.textContent = track?.coverPath
@@ -109,10 +124,12 @@ function render(snapshotNext) {
   const wasFollowingCurrent = !dirty && (!selectedId || selectedId === snapshot.currentTrackId);
   const previousSelection = selectedId;
   snapshot = snapshotNext;
+  renderTheme(snapshot.themeAccent, snapshot.themeHover);
   if (wasFollowingCurrent) selectedId = snapshot.currentTrackId;
   if (!snapshot.tracks.some((track) => track.id === selectedId)) {
     selectedId = snapshot.currentTrackId || snapshot.tracks[0]?.id || '';
   }
+  if (selectedId !== previousSelection) coverSelectionRevision += 1;
 
   renderPlaylist();
   const optionSignature = snapshot.tracks.map((track) => `${track.id}:${track.number}:${track.title}`).join('|');
@@ -157,16 +174,15 @@ function render(snapshotNext) {
     elements.commentOpacityInput.value = String(playback.commentOpacity ?? 72);
   }
   elements.commentOpacityValue.value = `${elements.commentOpacityInput.value}%`;
-  elements.unparsedInput.checked = Boolean(playback.unparsedAsComment);
   elements.exportButton.disabled = !snapshot.sessionId;
-  elements.connectionStatus.textContent = snapshot.connection?.message || '模拟弹幕模式';
-  elements.connectButton.disabled = ['starting', 'reconnecting'].includes(snapshot.connection?.status);
-  elements.disconnectButton.disabled = !['connected', 'reconnecting'].includes(snapshot.connection?.status);
 }
 
 async function saveMetadata() {
   const track = selectedTrack();
   if (!track) return;
+  const selectionAtSave = selectedId;
+  const revisionAtSave = editRevision;
+  const coverAtSave = pendingCover;
   const title = elements.titleInput.value.trim();
   if (!title) {
     setStatus('曲目名称不能为空', true);
@@ -176,26 +192,37 @@ async function saveMetadata() {
   const update = {
     id: track.id,
     title,
+    composer: elements.composerInput.value.trim(),
     submitter: elements.submitterInput.value.trim(),
+    genre: elements.genreInput.value.trim(),
     description: elements.descriptionInput.value.trim(),
     descriptionVisible: elements.visibleInput.checked,
   };
-  if (pendingCover) {
-    update.coverDataUrl = pendingCover.dataUrl;
-    update.coverPath = pendingCover.path;
+  if (coverAtSave) {
+    update.coverDataUrl = coverAtSave.dataUrl;
+    update.coverPath = coverAtSave.path;
   }
   try {
     await api.updateTrack(update);
-    Object.assign(track, {
+    const savedTrack = snapshot.tracks.find((item) => item.id === update.id);
+    if (savedTrack && editRevision === revisionAtSave) Object.assign(savedTrack, {
       title: update.title,
+      composer: update.composer,
       submitter: update.submitter,
+      genre: update.genre,
       description: update.description,
       descriptionVisible: update.descriptionVisible,
-      ...(pendingCover ? { hasCover: Boolean(pendingCover.dataUrl), coverPath: pendingCover.path } : {}),
+      ...(coverAtSave ? { hasCover: Boolean(coverAtSave.dataUrl), coverPath: coverAtSave.path } : {}),
     });
-    dirty = false;
-    pendingCover = null;
-    setStatus('曲目信息已应用');
+    if (selectedId === selectionAtSave && editRevision === revisionAtSave) {
+      dirty = false;
+      pendingCover = null;
+      setStatus('曲目信息已应用');
+    } else if (dirty) {
+      setStatus('先前修改已保存，当前更改尚未保存');
+    } else {
+      setStatus('曲目信息已应用');
+    }
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -207,44 +234,6 @@ async function importMedia(itemsPromise) {
     if (items?.length) await command('import', { items });
   } catch (error) {
     setStatus(`导入失败：${error.message}`, true);
-  }
-}
-
-async function loadConfig() {
-  try {
-    const config = await api.getConfig();
-    elements.appIdInput.value = config.appId || '';
-    elements.accessKeyInput.value = config.accessKey || '';
-    elements.secretState.textContent = config.hasSecret ? '密钥已加密保存' : '尚未保存密钥';
-  } catch (error) {
-    setStatus(error.message, true);
-  }
-}
-
-async function saveConfig() {
-  const result = await api.saveConfig({
-    appId: elements.appIdInput.value,
-    accessKey: elements.accessKeyInput.value,
-    accessSecret: elements.accessSecretInput.value,
-  });
-  elements.accessSecretInput.value = '';
-  elements.secretState.textContent = result.hasSecret ? '密钥已加密保存' : '尚未保存密钥';
-  setStatus('开发者配置已保存');
-}
-
-async function connectLive() {
-  elements.connectButton.disabled = true;
-  try {
-    await saveConfig();
-    const identityCode = elements.identityCodeInput.value.trim();
-    if (!identityCode) throw new Error('请输入本场主播身份码');
-    await api.connectLive(identityCode);
-    elements.identityCodeInput.value = '';
-    setStatus('已连接直播间');
-  } catch (error) {
-    setStatus(error.message, true);
-  } finally {
-    elements.connectButton.disabled = false;
   }
 }
 
@@ -278,11 +267,27 @@ function streamOptions(mode, filePath = '') {
 }
 
 elements.importButton.addEventListener('click', () => importMedia(api.selectMedia()));
+elements.openPlaylistButton.addEventListener('click', () => {
+  if (dirty) {
+    setStatus('请先保存当前曲目信息，再导入歌单', true);
+    return;
+  }
+  command('open-playlist');
+});
+elements.savePlaylistButton.addEventListener('click', () => {
+  if (dirty) {
+    setStatus('请先保存当前曲目信息，再保存歌单', true);
+    return;
+  }
+  command('save-playlist');
+});
 elements.exportButton.addEventListener('click', async () => {
   if (!snapshot.sessionId) return;
   try {
     const result = await api.exportArchiveCsv(snapshot.sessionId);
-    if (result) setStatus(`已导出 ${result.count} 条评论/评分`);
+    if (result) setStatus(result.incomplete
+      ? `已导出 ${result.count} 条，但存档写入曾失败，文件可能不完整`
+      : `已导出 ${result.count} 条评分`, Boolean(result.incomplete));
   } catch (error) {
     setStatus(`导出失败：${error.message}`, true);
   }
@@ -306,58 +311,69 @@ elements.commentOpacityInput.addEventListener('input', () => {
   command('comment-opacity', { value: Number(elements.commentOpacityInput.value) });
 });
 elements.trackSelect.addEventListener('change', () => {
+  if (dirty && !window.confirm('当前曲目信息尚未保存，确定放弃更改并切换曲目吗？')) {
+    elements.trackSelect.value = selectedId;
+    setStatus('未保存的曲目信息已保留，请先保存或确认放弃');
+    return;
+  }
   selectedId = elements.trackSelect.value;
+  coverSelectionRevision += 1;
+  editRevision += 1;
   dirty = false;
   renderSelected(true);
   setStatus('');
 });
-for (const id of ['titleInput', 'submitterInput', 'descriptionInput']) {
+for (const id of ['titleInput', 'composerInput', 'submitterInput', 'genreInput', 'descriptionInput']) {
   elements[id].addEventListener('input', () => {
+    editRevision += 1;
     dirty = true;
     setStatus('曲目信息尚未保存');
   });
 }
 elements.chooseCoverButton.addEventListener('click', async () => {
+  const selectionAtOpen = selectedId;
+  const selectionRevision = ++coverSelectionRevision;
   try {
     const selected = await api.selectCover();
     if (!selected) return;
+    await window.validateCoverImage(selected.dataUrl);
+    if (coverSelectionRevision !== selectionRevision) return;
+    if (selectedId !== selectionAtOpen) {
+      setStatus('选择封面期间切换了曲目，请重新选择封面', true);
+      return;
+    }
+    editRevision += 1;
     pendingCover = selected;
     dirty = true;
     elements.coverState.textContent = `待保存：${selected.path.split(/[\\/]/).pop()}`;
     setStatus('封面尚未保存');
   } catch (error) {
+    if (coverSelectionRevision !== selectionRevision) return;
     setStatus(`选择封面失败：${error.message}`, true);
   }
 });
 elements.clearCoverButton.addEventListener('click', () => {
+  coverSelectionRevision += 1;
+  editRevision += 1;
   pendingCover = { path: '', dataUrl: '' };
   dirty = true;
   elements.coverState.textContent = '保存后移除封面';
   setStatus('封面更改尚未保存');
 });
-elements.visibleInput.addEventListener('change', saveMetadata);
+elements.visibleInput.addEventListener('change', () => {
+  editRevision += 1;
+  dirty = true;
+  saveMetadata();
+});
 elements.saveButton.addEventListener('click', saveMetadata);
 elements.sendMockButton.addEventListener('click', () => {
   const message = elements.mockMessageInput.value.trim();
   if (!message) return;
-  command('mock-danmaku', { name: elements.mockNameInput.value.trim(), message });
+  command('submit-score', { name: elements.mockNameInput.value.trim(), message });
   elements.mockMessageInput.value = '';
 });
 elements.mockMessageInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') elements.sendMockButton.click();
-});
-elements.unparsedInput.addEventListener('change', () =>
-  command('unparsed-as-comment', { value: elements.unparsedInput.checked }));
-elements.saveConfigButton.addEventListener('click', () =>
-  saveConfig().catch((error) => setStatus(error.message, true)));
-elements.connectButton.addEventListener('click', connectLive);
-elements.disconnectButton.addEventListener('click', async () => {
-  try {
-    await api.disconnectLive();
-    setStatus('已断开直播间');
-  } catch (error) {
-    setStatus(error.message, true);
-  }
 });
 elements.ffmpegPathInput.value = localStorage.getItem('ffmpegPath') || '';
 elements.ffmpegPathInput.addEventListener('change', () => {
@@ -412,4 +428,3 @@ api.onStreamState(renderStreamState);
 api.getState().then(render).catch((error) => setStatus(error.message, true));
 api.getStreamState().then(renderStreamState).catch((error) => setStatus(error.message, true));
 probeStream();
-loadConfig();
