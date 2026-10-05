@@ -92,23 +92,30 @@ class ArchiveStore {
     for (const [index, line] of lines.entries()) {
       try {
         const record = JSON.parse(line);
-        if (['comment', 'score'].includes(record.type)) records.push(record);
+        if (typeof record.type === 'string' && (record.type === 'playlist_loaded' || record.type.startsWith('track_'))) {
+          records.push(record);
+        }
       } catch (error) {
         if (index !== lines.length - 1) throw error;
         // A crash can leave the final JSONL line unfinished; keep earlier records exportable.
       }
     }
-    const header = ['type', 'at', 'track_id', 'track_title', 'open_id', 'uname', 'score', 'comment', 'msg_id'];
+    const header = ['type', 'at', 'track_id', 'track_title', 'artist', 'composer', 'submitter', 'genre', 'media_type', 'source_path', 'position', 'description', 'description_visible', 'cover_path'];
     const rows = records.map((record) => [
       record.type,
       record.at,
       record.trackId ?? record.roundId,
       record.trackTitle,
-      record.openId,
-      record.uname,
-      record.score,
-      record.comment,
-      record.msgId,
+      record.artist,
+      record.composer,
+      record.submitter,
+      record.genre,
+      record.mediaType,
+      record.sourcePath,
+      record.position,
+      record.description,
+      record.descriptionVisible,
+      record.coverPath,
     ].map(csvCell).join(','));
     const csv = `\uFEFF${header.join(',')}\r\n${rows.join('\r\n')}`;
     await fs.writeFile(destination, csv, 'utf8');

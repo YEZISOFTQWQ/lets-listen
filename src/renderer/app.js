@@ -1,17 +1,13 @@
 'use strict';
 
 const api = window.tasteArena;
-const { parseScore } = window.TasteCommands;
 const MAX_TRACKS = 500;
 const MAX_OUTPUT_VOLUME = 1.25;
-const DEFAULT_THEME = { color: '#d8ff3e', hover: '#e5ff72', rgb: '216, 255, 62' };
-const NEUTRAL_THEME = { color: '#c4cbd4', hover: '#e0e4ea', rgb: '196, 203, 212' };
+const DEFAULT_THEME = { color: '#ffffff', hover: '#e9e9e9', rgb: '255, 255, 255' };
 
 const state = {
   tracks: [],
   currentIndex: -1,
-  scoresByRound: new Map(),
-  seenMessageIds: new Set(),
   sessionPromise: null,
   archiveQueue: Promise.resolve(),
   archiveError: '',
@@ -24,7 +20,7 @@ const state = {
   mediaSource: null,
   volumeGain: null,
   captureDestination: null,
-  descriptionScrollTimer: null,
+  descriptionScrollFrame: null,
   streamCapture: null,
   pendingStreamId: null,
   cancelledStreamCaptures: new Set(),
@@ -35,164 +31,187 @@ const state = {
   editingTrackId: '',
   editingTrackStale: false,
   theme: DEFAULT_THEME,
-  themeRevision: 0,
+  audioEngine: 'foobar',
+  foobarState: null,
+  foobarTrackId: '',
+  foobarWasPlaying: false,
+  foobarCompletedId: '',
+  loadRevision: 0,
+  seekDragging: false,
+  volumeDragging: false,
+  shadowSyncing: false,
+  shadowAnalysisUnavailable: false,
+  titleResizeObserver: null,
 };
 
 const elements = Object.fromEntries([
   'importButton', 'openPlaylistButton', 'savePlaylistButton', 'trackCount', 'playlist',
   'exportButton', 'programModeButton', 'programFrame', 'mediaElement', 'trackNumber', 'coverFrame',
-  'coverImage', 'coverBackdropImage', 'trackTitle', 'trackArtist', 'trackSubmitter', 'trackGenre', 'visualizer', 'averageScore',
+  'coverImage', 'coverBackdropImage', 'trackTitle', 'trackTitleText', 'trackTitleRepeat', 'trackArtist', 'trackSubmitter', 'visualizer',
   'descriptionCard', 'descriptionScroll', 'previousButton', 'playButton', 'nextButton',
-  'currentTime', 'progressInput', 'durationTime', 'volumeInput', 'mockNameInput', 'mockMessageInput',
+  'currentTime', 'progressInput', 'durationTime', 'volumeInput',
   'commentOpacityInput', 'commentOpacityValue',
-  'sendMockButton', 'dropOverlay', 'toastContainer', 'editTrackButton', 'backstageButton',
+  'dropOverlay', 'toastContainer', 'editTrackButton', 'backstageButton',
   'trackEditDialog', 'trackCoverPreview', 'chooseCoverButton', 'clearCoverButton',
   'trackTitleInput', 'trackComposerInput', 'trackSubmitterInput', 'trackGenreInput', 'trackDescriptionInput',
   'trackDescriptionVisibleInput', 'saveTrackMetadataButton',
+  'audioEngineSelect', 'trackGenreDisplay',
 ].map((id) => [id, document.getElementById(id)]));
+
+function isFoobarTrack() {
+  return state.audioEngine === 'foobar' && currentTrack()?.type === 'audio';
+}
+
+function externalName() {
+  return 'foobar2000';
+}
+
+function externalOpen(filePath) {
+  return api.foobarOpen(filePath);
+}
+
+function externalCommand(type, args) {
+  return api.foobarCommand(type, args);
+}
+
+function playbackPosition() {
+  return isFoobarTrack() && state.foobarTrackId === currentTrack()?.id
+    ? Number(state.foobarState?.currentTime || 0) : elements.mediaElement.currentTime || 0;
+}
+
+function playbackDuration() {
+  return isFoobarTrack() && state.foobarTrackId === currentTrack()?.id
+    ? Number(state.foobarState?.duration || currentTrack()?.duration || 0)
+    : Number.isFinite(elements.mediaElement.duration) ? elements.mediaElement.duration : currentTrack()?.duration || 0;
+}
+
+function playbackPaused() {
+  return isFoobarTrack() ? (state.foobarState?.paused ?? true) : elements.mediaElement.paused;
+}
+
+function updatePlaybackDisplay(position, duration, paused) {
+  elements.currentTime.textContent = formatTime(position);
+  elements.durationTime.textContent = formatTime(duration);
+  if (!state.seekDragging) elements.progressInput.value = duration > 0 ? String(Math.round(position / duration * 1000)) : '0';
+  elements.playButton.textContent = paused ? '▶' : 'Ⅱ';
+  elements.programFrame.classList.toggle('playing', !paused);
+  publishBackstageState();
+}
+
+async function syncShadowPlayback(next) {
+  if (!isFoobarTrack() || !state.foobarTrackId || state.shadowSyncing || state.shadowAnalysisUnavailable) return;
+  const trackId = state.foobarTrackId;
+  const media = elements.mediaElement;
+  state.shadowSyncing = true;
+  try {
+    await ensureAudioGraph();
+    if (!isFoobarTrack() || state.foobarTrackId !== trackId) return;
+    state.volumeGain.gain.value = 0;
+    if (media.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    const limit = Number.isFinite(media.duration) ? Math.max(0, media.duration - 0.05) : next.currentTime;
+    const target = Math.max(0, Math.min(Number(next.currentTime) || 0, limit));
+    if (Math.abs(media.currentTime - target) > 0.4) media.currentTime = target;
+    if (next.paused) media.pause();
+    else if (media.paused) await media.play();
+  } catch (error) {
+    if (!isFoobarTrack() || state.foobarTrackId !== trackId) return;
+    const firstFailure = !state.shadowAnalysisUnavailable;
+    state.shadowAnalysisUnavailable = true;
+    media.pause();
+    if (firstFailure) showToast('当前音频无法用于实时频谱分析，已改用动态效果', 'info', 6000);
+    console.warn('External-player silent analysis unavailable', error);
+  } finally {
+    state.shadowSyncing = false;
+  }
+}
+
+function applyFoobarState(next) {
+  if (!isFoobarTrack()) return;
+  if (next.unavailable) {
+    const message = next.message || `${externalName()} 连接中断`;
+    const lastPosition = Number(state.foobarState?.currentTime || 0);
+    state.audioEngine = 'builtin';
+    state.foobarTrackId = '';
+    state.foobarState = null;
+    elements.audioEngineSelect.value = 'builtin';
+    api.foobarCommand('close').catch(() => {});
+    elements.mediaElement.pause();
+    if (state.volumeGain) state.volumeGain.gain.value = Number(elements.volumeInput.value);
+    if (lastPosition > 0 && Number.isFinite(elements.mediaElement.duration)) {
+      elements.mediaElement.currentTime = Math.min(lastPosition, elements.mediaElement.duration || 0);
+    }
+    showToast(`${message}；已切回内置播放器`, 'error', 7000);
+    updatePlaybackDisplay(elements.mediaElement.currentTime || 0, playbackDuration(), true);
+    return;
+  }
+  if (state.foobarTrackId !== currentTrack()?.id) return;
+  const track = currentTrack();
+  const previous = state.foobarState;
+  const knownDuration = Number(next.duration || previous?.duration || track.duration || 0);
+  const wrapped = state.foobarWasPlaying && previous && !previous.paused && !next.paused
+    && knownDuration > 0 && previous.currentTime >= knownDuration - 1.5 && next.currentTime < 1;
+  if (wrapped) {
+    externalCommand('pause').catch((error) => showToast(`歌曲结束后暂停失败：${error.message}`, 'error'));
+  }
+  if (state.foobarCompletedId === track.id && !next.paused && next.currentTime < knownDuration - 1) {
+    state.foobarCompletedId = '';
+  }
+  const reachedEnd = state.foobarWasPlaying && (next.idle || wrapped) && knownDuration > 0
+    && (next.currentTime >= knownDuration - 1.5 || previous?.currentTime >= knownDuration - 1.5);
+  if (reachedEnd && state.foobarCompletedId !== track.id) {
+    state.foobarCompletedId = track.id;
+    archive({ type: 'track_completed', roundId: track.roundId, trackTitle: track.title });
+  }
+  if (state.foobarCompletedId === track.id && (next.idle || wrapped)) {
+    next = { ...next, currentTime: knownDuration, duration: knownDuration, paused: true, idle: true };
+  }
+  state.foobarState = next;
+  if (next.duration > 0) track.duration = next.duration;
+  if (Number.isFinite(next.volume) && !state.volumeDragging) {
+    elements.volumeInput.value = String(Math.min(MAX_OUTPUT_VOLUME, Math.max(0, next.volume / 80)));
+  }
+  updatePlaybackDisplay(next.currentTime, next.duration || track.duration || 0, next.paused);
+  syncShadowPlayback(next);
+  if (!next.paused) state.foobarWasPlaying = true;
+}
 
 function formatTime(value) {
   const seconds = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function hashName(value) {
-  let hash = 5381;
-  for (const char of value) hash = ((hash << 5) + hash) ^ char.charCodeAt(0);
-  return (hash >>> 0).toString(16);
-}
-
 function currentTrack() {
   return state.tracks[state.currentIndex] || null;
 }
 
+function refreshTrackTitleScroll() {
+  const viewport = elements.trackTitle;
+  const text = elements.trackTitleText;
+  viewport.classList.remove('title-scrolling');
+  if (!viewport.clientWidth) return;
+  const overflow = Math.ceil(text.scrollWidth - viewport.clientWidth);
+  if (overflow <= 4) return;
+  viewport.style.setProperty('--title-scroll-distance', `${-overflow}px`);
+  viewport.style.setProperty('--title-scroll-duration', `${Math.max(8, 4 + overflow / 24).toFixed(1)}s`);
+  viewport.classList.add('title-scrolling');
+}
+
+function setTrackTitle(title) {
+  elements.trackTitleText.textContent = title;
+  refreshTrackTitleScroll();
+}
+
 function trackCreator(track) {
-  if (track?.composer?.trim()) return `作曲：${track.composer}`;
-  if (track?.artist?.trim()) return `艺人：${track.artist}`;
-  return '作曲 / 艺人：未标注';
+  return track?.composer?.trim() || '作曲未标注';
 }
 
 function renderTrackCredits() {
   const track = currentTrack();
   elements.trackArtist.textContent = trackCreator(track);
-  elements.trackSubmitter.textContent = track?.submitter || '待填写';
-  elements.trackGenre.textContent = track?.genre || '待填写';
-}
-
-function themeFromHsl(hue, saturation, lightness) {
-  function rgbAt(level) {
-    const chroma = (1 - Math.abs(2 * level - 1)) * saturation;
-    const secondary = chroma * (1 - Math.abs((hue / 60) % 2 - 1));
-    const offset = level - chroma / 2;
-    const sextant = Math.floor(hue / 60) % 6;
-    const channels = [
-      [chroma, secondary, 0], [secondary, chroma, 0], [0, chroma, secondary],
-      [0, secondary, chroma], [secondary, 0, chroma], [chroma, 0, secondary],
-    ][sextant];
-    return channels.map((channel) => Math.round((channel + offset) * 255));
-  }
-  const relativeLuminance = (channels) => channels.reduce((sum, channel, index) => {
-    const value = channel / 255;
-    const linear = value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
-    return sum + linear * [.2126, .7152, .0722][index];
-  }, 0);
-  let adjustedLightness = lightness;
-  let rgb = rgbAt(adjustedLightness);
-  while (relativeLuminance(rgb) < .33 && adjustedLightness < .86) {
-    adjustedLightness = Math.min(.86, adjustedLightness + .02);
-    rgb = rgbAt(adjustedLightness);
-  }
-  const hex = (channels) => `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
-  return { color: hex(rgb), hover: hex(rgbAt(Math.min(.91, adjustedLightness + .08))), rgb: rgb.join(', ') };
-}
-
-function impressionTheme(image) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 48;
-  canvas.height = 48;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) return DEFAULT_THEME;
-  context.drawImage(image, 0, 0, 48, 48);
-  const pixels = context.getImageData(0, 0, 48, 48).data;
-  const bins = Array.from({ length: 18 }, () => ({ weight: 0, x: 0, y: 0, saturation: 0, lightness: 0 }));
-  for (let index = 0; index < pixels.length; index += 4) {
-    const alpha = pixels[index + 3] / 255;
-    if (alpha < .5) continue;
-    const red = pixels[index] / 255;
-    const green = pixels[index + 1] / 255;
-    const blue = pixels[index + 2] / 255;
-    const maximum = Math.max(red, green, blue);
-    const minimum = Math.min(red, green, blue);
-    const difference = maximum - minimum;
-    const lightness = (maximum + minimum) / 2;
-    const saturation = difference / (1 - Math.abs(2 * lightness - 1) || 1);
-    if (saturation < .22 || lightness < .12 || lightness > .91) continue;
-    let hue;
-    if (maximum === red) hue = ((green - blue) / difference) % 6;
-    else if (maximum === green) hue = (blue - red) / difference + 2;
-    else hue = (red - green) / difference + 4;
-    hue = (hue * 60 + 360) % 360;
-    const weight = alpha * Math.pow(saturation, 1.3) * Math.sin(Math.PI * lightness);
-    const bin = bins[Math.floor(hue / 20) % bins.length];
-    bin.weight += weight;
-    bin.x += Math.cos(hue * Math.PI / 180) * weight;
-    bin.y += Math.sin(hue * Math.PI / 180) * weight;
-    bin.saturation += saturation * weight;
-    bin.lightness += lightness * weight;
-  }
-  let bestIndex = -1;
-  let bestWeight = 0;
-  for (let index = 0; index < bins.length; index += 1) {
-    const score = bins[index].weight + .55 * (bins[(index + 17) % 18].weight + bins[(index + 1) % 18].weight);
-    if (score > bestWeight) { bestWeight = score; bestIndex = index; }
-  }
-  if (bestIndex < 0) return NEUTRAL_THEME;
-  let totalWeight = 0;
-  let x = 0;
-  let y = 0;
-  let saturation = 0;
-  let lightness = 0;
-  for (const offset of [-1, 0, 1]) {
-    const bin = bins[(bestIndex + offset + 18) % 18];
-    const share = offset === 0 ? 1 : .55;
-    totalWeight += bin.weight * share;
-    x += bin.x * share;
-    y += bin.y * share;
-    saturation += bin.saturation * share;
-    lightness += bin.lightness * share;
-  }
-  const hue = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-  const vividness = Math.max(.62, Math.min(.88, saturation / totalWeight * 1.15));
-  const brightness = Math.max(.62, Math.min(.7, .65 + (lightness / totalWeight - .5) * .12));
-  return themeFromHsl(hue, vividness, brightness);
-}
-
-function applyTheme(theme) {
-  if (state.theme.color === theme.color) return;
-  state.theme = theme;
-  const root = document.documentElement.style;
-  root.setProperty('--acid', theme.color);
-  root.setProperty('--accent-rgb', theme.rgb);
-  root.setProperty('--accent-hover', theme.hover);
-  publishBackstageState();
-}
-
-function updateThemeFromCover(track) {
-  const revision = ++state.themeRevision;
-  const cover = track?.coverDataUrl || '';
-  if (!cover) { applyTheme(DEFAULT_THEME); return; }
-  if (track.themeCover === cover && track.theme) { applyTheme(track.theme); return; }
-  const image = new Image();
-  image.src = cover;
-  image.decode().then(() => {
-    if (revision !== state.themeRevision || currentTrack() !== track || track.coverDataUrl !== cover) return;
-    const theme = impressionTheme(image);
-    track.themeCover = cover;
-    track.theme = theme;
-    applyTheme(theme);
-  }).catch(() => {
-    if (revision === state.themeRevision && currentTrack() === track) applyTheme(DEFAULT_THEME);
-  });
+  elements.trackSubmitter.textContent = track?.submitter || '投稿人待填写';
+  const genre = track?.genre?.trim() || '';
+  elements.trackGenreDisplay.textContent = genre;
+  elements.trackGenreDisplay.hidden = !genre;
 }
 
 function renderTrackCover(track) {
@@ -207,11 +226,6 @@ function renderTrackCover(track) {
     elements.coverBackdropImage.removeAttribute('src');
   }
   elements.mediaElement.poster = track?.posterDataUrl || cover;
-  updateThemeFromCover(track);
-}
-
-function trackForRound(roundId) {
-  return state.tracks.find((track) => track.roundId === roundId) || null;
 }
 
 function publishBackstageState() {
@@ -236,10 +250,11 @@ function publishBackstageState() {
       descriptionVisible: Boolean(track.descriptionVisible),
     })),
     playback: {
-      currentTime: elements.mediaElement.currentTime || 0,
-      duration: Number.isFinite(elements.mediaElement.duration) ? elements.mediaElement.duration : currentTrack()?.duration || 0,
-      paused: elements.mediaElement.paused,
+      currentTime: playbackPosition(),
+      duration: playbackDuration(),
+      paused: playbackPaused(),
       volume: Number(elements.volumeInput.value),
+      audioEngine: state.audioEngine,
       commentOpacity: Number(elements.commentOpacityInput.value),
       programMode: document.body.classList.contains('program-mode'),
     },
@@ -252,31 +267,48 @@ function renderTrackDescription() {
   elements.descriptionCard.hidden = !visible;
   elements.descriptionScroll.textContent = visible ? track.description : '';
   elements.descriptionScroll.scrollTop = 0;
-  clearInterval(state.descriptionScrollTimer);
-  state.descriptionScrollTimer = null;
+  cancelAnimationFrame(state.descriptionScrollFrame);
+  state.descriptionScrollFrame = null;
   if (!visible) return;
   let lastTick = performance.now();
   let pauseUntil = lastTick + 2000;
   let atEnd = false;
-  state.descriptionScrollTimer = setInterval(() => {
-    const now = performance.now();
+  let position = 0;
+  let renderedPosition = 0;
+  const tick = (now) => {
+    state.descriptionScrollFrame = requestAnimationFrame(tick);
     const elapsed = Math.min(100, now - lastTick);
     lastTick = now;
     const scroll = elements.descriptionScroll;
     const maximum = scroll.scrollHeight - scroll.clientHeight;
-    if (elements.descriptionCard.hidden || maximum <= 1 || now < pauseUntil) return;
+    if (elements.descriptionCard.hidden || maximum <= 1) return;
+    if (Math.abs(scroll.scrollTop - renderedPosition) > .5) {
+      position = Math.max(0, Math.min(maximum, scroll.scrollTop));
+      renderedPosition = scroll.scrollTop;
+      atEnd = false;
+      pauseUntil = now + 1500;
+    }
+    if (now < pauseUntil) return;
     if (atEnd) {
+      position = 0;
       scroll.scrollTop = 0;
+      renderedPosition = 0;
       atEnd = false;
       pauseUntil = now + 2000;
       return;
     }
-    scroll.scrollTop = Math.min(maximum, scroll.scrollTop + elapsed * 0.03);
-    if (scroll.scrollTop >= maximum - 1) {
+    position = Math.min(maximum, position + elapsed * 0.03);
+    const nextPosition = Math.floor(position);
+    if (nextPosition !== renderedPosition) {
+      scroll.scrollTop = nextPosition;
+      renderedPosition = scroll.scrollTop;
+    }
+    if (position >= maximum) {
       atEnd = true;
       pauseUntil = now + 2500;
     }
-  }, 50);
+  };
+  state.descriptionScrollFrame = requestAnimationFrame(tick);
 }
 
 function showToast(message, type = 'info', duration = 3600) {
@@ -317,7 +349,7 @@ function archive(entry) {
     state.archiveError = error.message || String(error);
     if (Date.now() - state.archiveWarningAt > 30_000) {
       state.archiveWarningAt = Date.now();
-      showToast('存档写入失败：评分仍会显示，但导出可能不完整。请检查磁盘空间和存档目录权限。', 'error', 8000);
+      showToast('播放记录写入失败；请检查磁盘空间和存档目录权限。', 'error', 8000);
     }
   });
   return state.archiveQueue;
@@ -365,6 +397,26 @@ function renderPlaylist() {
     elements.playlist.appendChild(item);
   });
   publishBackstageState();
+}
+
+function reorderTrack(id, targetId, placement) {
+  const from = state.tracks.findIndex((track) => track.id === id);
+  const target = state.tracks.findIndex((track) => track.id === targetId);
+  if (from < 0 || target < 0 || !['before', 'after'].includes(placement)) {
+    throw new Error('无法调整播放顺序：曲目已变化');
+  }
+  let insertion = target + (placement === 'after' ? 1 : 0);
+  if (from < insertion) insertion -= 1;
+  if (from === insertion) return;
+  const currentId = currentTrack()?.id;
+  const [moved] = state.tracks.splice(from, 1);
+  state.tracks.splice(insertion, 0, moved);
+  state.tracks.forEach((track, index) => { track.roundId = String(index + 1).padStart(2, '0'); });
+  state.currentIndex = state.tracks.findIndex((track) => track.id === currentId);
+  if (state.currentIndex >= 0) elements.trackNumber.textContent = String(state.currentIndex + 1);
+  archive({ type: 'track_reordered', trackId: moved.id, trackTitle: moved.title, from: from + 1, to: insertion + 1 });
+  renderPlaylist();
+  api.sendBackstageFeedback(`已将《${moved.title}》移到 TRACK ${insertion + 1}`, 'info').catch(() => {});
 }
 
 async function addTracks(items, { initialIndex = 0, announce = true } = {}) {
@@ -434,7 +486,10 @@ async function openPlaylist() {
     if (!Array.isArray(loaded.tracks) || !loaded.tracks.length) throw new Error('歌单没有可导入的曲目');
     const previous = currentTrack();
     if (previous) archive({ type: 'track_leave', roundId: previous.roundId,
-      trackTitle: previous.title, position: elements.mediaElement.currentTime || 0 });
+      trackTitle: previous.title, position: playbackPosition() });
+    if (state.foobarTrackId) await externalCommand('close').catch(() => {});
+    state.foobarTrackId = '';
+    state.foobarState = null;
     elements.mediaElement.pause();
     elements.mediaElement.removeAttribute('src');
     elements.mediaElement.load();
@@ -443,8 +498,6 @@ async function openPlaylist() {
     state.coverSelectionRevision += 1;
     state.tracks = [];
     state.currentIndex = -1;
-    state.scoresByRound.clear();
-    state.seenMessageIds.clear();
     archive({ type: 'playlist_loaded', sourcePath: loaded.path, trackCount: loaded.tracks.length });
     await addTracks(loaded.tracks, { initialIndex: loaded.selectedIndex, announce: false });
     showToast(`已恢复 ${loaded.tracks.length} 首曲目及其资料${loaded.missing.length ? `；跳过 ${loaded.missing.length} 首缺失媒体` : ''}${loaded.missingCovers ? `；${loaded.missingCovers} 张封面未找到` : ''}`, 'success', 7000);
@@ -456,19 +509,31 @@ async function openPlaylist() {
 async function loadTrack(index, autoplay = false) {
   const track = state.tracks[index];
   if (!track) return;
+  const revision = ++state.loadRevision;
   const previous = currentTrack();
   if (previous && previous.id !== track.id) {
-    archive({ type: 'track_leave', roundId: previous.roundId, trackTitle: previous.title, position: elements.mediaElement.currentTime || 0 });
+    archive({ type: 'track_leave', roundId: previous.roundId, trackTitle: previous.title, position: playbackPosition() });
   }
 
   elements.mediaElement.pause();
+  state.shadowAnalysisUnavailable = false;
+  if (state.foobarTrackId && (!autoplay || track.type === 'video' || state.audioEngine !== 'foobar')) {
+    await externalCommand('close').catch(() => {});
+    state.foobarTrackId = '';
+    state.foobarState = null;
+  }
   state.currentIndex = index;
+  state.foobarCompletedId = '';
+  state.foobarWasPlaying = false;
+  if (isFoobarTrack()) { state.foobarTrackId = ''; state.foobarState = null; }
+  if (state.volumeGain) state.volumeGain.gain.value = isFoobarTrack() ? 0 : Number(elements.volumeInput.value);
   elements.mediaElement.src = track.url;
   elements.mediaElement.load();
   elements.programFrame.classList.remove('no-media');
   elements.programFrame.classList.toggle('video-mode', track.type === 'video');
-  elements.trackNumber.textContent = track.roundId;
-  elements.trackTitle.textContent = track.title;
+  elements.trackNumber.textContent = String(Number(track.roundId));
+  setTrackTitle(track.title);
+  elements.trackTitleRepeat.textContent = track.title;
   renderTrackCredits();
   renderTrackCover(track);
   renderTrackDescription();
@@ -476,15 +541,34 @@ async function loadTrack(index, autoplay = false) {
   elements.currentTime.textContent = '00:00';
   elements.progressInput.value = '0';
   renderPlaylist();
-  renderScore();
   archive({ type: 'track_enter', roundId: track.roundId, trackTitle: track.title, autoplay });
 
   if (autoplay) {
     try {
-      await ensureAudioGraph();
-      await elements.mediaElement.play();
+      if (isFoobarTrack()) {
+        const desiredVolume = Number(elements.volumeInput.value);
+        const opened = await externalOpen(track.path);
+        if (revision !== state.loadRevision) return;
+        state.foobarTrackId = track.id;
+        applyFoobarState(opened);
+        await externalCommand('volume', { value: Math.round(desiredVolume * 80) });
+      } else {
+        await ensureAudioGraph();
+        await elements.mediaElement.play();
+      }
     } catch (error) {
       showToast(`无法播放：${error.message}`, 'error');
+      if (isFoobarTrack()) {
+        await externalCommand('close').catch(() => {});
+        state.audioEngine = 'builtin';
+        state.foobarTrackId = '';
+        state.foobarState = null;
+        if (state.volumeGain) state.volumeGain.gain.value = Number(elements.volumeInput.value);
+        elements.audioEngineSelect.value = 'builtin';
+        try { await ensureAudioGraph(); await elements.mediaElement.play(); }
+        catch (fallbackError) { showToast(`内置播放器也无法播放：${fallbackError.message}`, 'error'); }
+        publishBackstageState();
+      }
     }
   }
 }
@@ -493,14 +577,16 @@ async function ensureAudioGraph() {
   if (!state.audioContext) {
     state.audioContext = new AudioContext();
     state.analyser = state.audioContext.createAnalyser();
-    state.analyser.fftSize = 256;
-    state.analyser.smoothingTimeConstant = 0.78;
+    state.analyser.fftSize = 2048;
+    state.analyser.minDecibels = -90;
+    state.analyser.maxDecibels = 0;
+    state.analyser.smoothingTimeConstant = 0.35;
     state.mediaSource = state.audioContext.createMediaElementSource(elements.mediaElement);
     state.volumeGain = state.audioContext.createGain();
-    state.volumeGain.gain.value = Number(elements.volumeInput.value);
-    state.mediaSource.connect(state.volumeGain);
-    state.volumeGain.connect(state.analyser);
-    state.analyser.connect(state.audioContext.destination);
+    state.volumeGain.gain.value = isFoobarTrack() ? 0 : Number(elements.volumeInput.value);
+    state.mediaSource.connect(state.analyser);
+    state.analyser.connect(state.volumeGain);
+    state.volumeGain.connect(state.audioContext.destination);
     state.captureDestination = state.audioContext.createMediaStreamDestination();
     state.volumeGain.connect(state.captureDestination);
   }
@@ -512,25 +598,97 @@ function setOutputVolume(value, publish = true) {
   const volume = Number.isFinite(number) ? Math.max(0, Math.min(MAX_OUTPUT_VOLUME, number)) : 0.85;
   elements.volumeInput.value = String(volume);
   elements.mediaElement.volume = 1;
-  if (state.volumeGain) state.volumeGain.gain.value = volume;
+  if (state.volumeGain) state.volumeGain.gain.value = isFoobarTrack() ? 0 : volume;
+  if (isFoobarTrack() && state.foobarTrackId) {
+    externalCommand('volume', { value: Math.round(volume * 80) })
+      .catch((error) => showToast(`${externalName()} 音量调整失败：${error.message}`, 'error'));
+  }
   if (publish) publishBackstageState();
 }
 
 async function togglePlayback() {
-  if (!currentTrack()) {
+  const track = currentTrack();
+  if (!track) {
     showToast('请先导入媒体文件');
     return;
   }
   try {
+    if (isFoobarTrack()) {
+      if (!state.foobarTrackId) {
+        await loadTrack(state.currentIndex, true);
+      } else if (playbackPaused() && (state.foobarCompletedId === track.id
+        || (playbackDuration() > 0 && playbackPosition() >= playbackDuration() - 0.2))) {
+        await loadTrack(state.currentIndex, true);
+      } else {
+        await externalCommand(playbackPaused() ? 'play' : 'pause');
+      }
+      return;
+    }
     await ensureAudioGraph();
-    if (elements.mediaElement.paused) await elements.mediaElement.play();
+    if (elements.mediaElement.paused) {
+      if (elements.mediaElement.ended) elements.mediaElement.currentTime = 0;
+      await elements.mediaElement.play();
+    }
     else elements.mediaElement.pause();
   } catch (error) {
     showToast(`播放失败：${error.message}`, 'error');
   }
 }
 
+async function setAudioEngine(engine) {
+  if (!['builtin', 'foobar'].includes(engine) || engine === state.audioEngine) return;
+  const track = currentTrack();
+  const position = playbackPosition();
+  const wasPlaying = !playbackPaused();
+  if (state.foobarTrackId) {
+    await externalCommand('close').catch(() => {});
+    state.foobarTrackId = '';
+    state.foobarState = null;
+  }
+  if (engine !== 'builtin' && track?.type === 'audio') {
+    const desiredVolume = Number(elements.volumeInput.value);
+    elements.mediaElement.pause();
+    state.audioEngine = engine;
+    state.shadowAnalysisUnavailable = false;
+    if (state.volumeGain) state.volumeGain.gain.value = 0;
+    try {
+      const opened = await externalOpen(track.path);
+      state.foobarTrackId = track.id;
+      applyFoobarState(opened);
+      await externalCommand('volume', { value: Math.round(desiredVolume * 80) });
+      if (position > 0) await externalCommand('seek', { seconds: position });
+      if (!wasPlaying) await externalCommand('pause');
+    } catch (error) {
+      state.audioEngine = 'builtin';
+      state.foobarTrackId = '';
+      state.foobarState = null;
+      if (state.volumeGain) state.volumeGain.gain.value = desiredVolume;
+      await externalCommand('close').catch(() => {});
+      elements.audioEngineSelect.value = 'builtin';
+      if (wasPlaying) {
+        await ensureAudioGraph().catch(() => {});
+        await elements.mediaElement.play().catch(() => {});
+      }
+      publishBackstageState();
+      throw error;
+    }
+  } else {
+    state.audioEngine = engine;
+    state.foobarTrackId = '';
+    state.foobarState = null;
+    if (state.volumeGain) state.volumeGain.gain.value = Number(elements.volumeInput.value);
+    if (track?.type === 'audio' && engine === 'builtin') {
+      if (Number.isFinite(elements.mediaElement.duration)) elements.mediaElement.currentTime = Math.min(position, elements.mediaElement.duration || 0);
+      if (wasPlaying) { await ensureAudioGraph(); await elements.mediaElement.play(); }
+    }
+  }
+  elements.audioEngineSelect.value = engine;
+  updatePlaybackDisplay(playbackPosition(), playbackDuration(), playbackPaused());
+  showToast(engine === 'builtin' ? '已切回内置播放器' : `音频已切换到 ${externalName()}；视频仍使用内置播放器`, 'success');
+}
+
 async function startStreamCapture({ id, mediaSourceId, testSeconds = 0 }) {
+  if (isFoobarTrack()) throw new Error(`${externalName()} 音频不能接入内置推流；请使用 OBS 捕获桌面音频，或切回内置播放器`);
   if (state.streamCapture || state.pendingStreamId) throw new Error('已有画面采集正在运行');
   state.pendingStreamId = id;
   let displayStream;
@@ -684,7 +842,8 @@ function saveTrackMetadata() {
   track.description = elements.trackDescriptionInput.value.trim();
   track.descriptionVisible = elements.trackDescriptionVisibleInput.checked;
   if (track.id === currentTrack()?.id) {
-    elements.trackTitle.textContent = track.title;
+    setTrackTitle(track.title);
+    elements.trackTitleRepeat.textContent = track.title;
     renderTrackCredits();
     renderTrackCover(track);
     renderTrackDescription();
@@ -738,7 +897,8 @@ function applyBackstageUpdate(update) {
     showToast('该曲目已在后台修改，当前编辑窗口需要重新打开', 'error');
   }
   if (track.id === currentTrack()?.id) {
-    elements.trackTitle.textContent = track.title;
+    setTrackTitle(track.title);
+    elements.trackTitleRepeat.textContent = track.title;
     renderTrackCredits();
     renderTrackCover(track);
     renderTrackDescription();
@@ -757,86 +917,14 @@ function applyBackstageUpdate(update) {
   });
 }
 
-function renderScore() {
-  const roundId = currentTrack()?.roundId;
-  const scores = roundId ? [...(state.scoresByRound.get(roundId)?.values() || [])] : [];
-  if (!scores.length) {
-    elements.averageScore.textContent = '--';
-    return;
-  }
-  const average = scores.reduce((total, entry) => total + entry.score, 0) / scores.length;
-  elements.averageScore.textContent = average.toFixed(1);
-}
-
-function processScoreInput(data) {
-  const msgId = String(data.msg_id || crypto.randomUUID());
-  if (state.seenMessageIds.has(msgId)) return;
-  state.seenMessageIds.add(msgId);
-  if (state.seenMessageIds.size > 10_000) {
-    const oldest = state.seenMessageIds.values().next().value;
-    state.seenMessageIds.delete(oldest);
-  }
-
-  const parsed = parseScore(data.msg, { currentRound: currentTrack()?.roundId });
-  if (parsed.type === 'invalid') {
-    showToast(parsed.reason, 'error');
-    return;
-  }
-  if (parsed.type !== 'score') {
-    showToast('请输入评分，例如 #01 8.5 或 评分 8.5', 'error');
-    return;
-  }
-
-  const targetTrack = trackForRound(parsed.roundId);
-  if (!targetTrack) {
-    showToast(`找不到编号 ${parsed.roundId} 的曲目`, 'error');
-    return;
-  }
-
-  const openId = String(data.open_id || `local:${data.uname || 'anonymous'}`);
-  const actor = {
-    openId,
-    uname: data.uname || '匿名评分人',
-    msgId,
-    roundId: parsed.roundId,
-    trackTitle: targetTrack.title,
-  };
-  let roundScores = state.scoresByRound.get(parsed.roundId);
-  if (!roundScores) {
-    roundScores = new Map();
-    state.scoresByRound.set(parsed.roundId, roundScores);
-  }
-  roundScores.set(openId, { ...actor, score: parsed.score });
-  archive({ type: 'score', ...actor, score: parsed.score, rawMessage: parsed.raw });
-  if (parsed.roundId === currentTrack()?.roundId) renderScore();
-}
-
-function submitLocalScore() {
-  const message = elements.mockMessageInput.value.trim();
-  if (!message) return;
-  const name = elements.mockNameInput.value.trim() || '测试观众';
-  emitLocalScore(name, message);
-  elements.mockMessageInput.value = '';
-  elements.mockMessageInput.focus();
-}
-
-function emitLocalScore(name, message) {
-  processScoreInput({
-    open_id: `mock-${hashName(name)}`,
-    uname: name,
-    msg: message,
-    msg_id: crypto.randomUUID(),
-  });
-}
-
 async function exportArchive() {
   try {
     await state.archiveQueue;
     const session = await ensureArchive();
     const result = await api.exportArchiveCsv(session.sessionId);
     if (result) showToast(result.incomplete
-      ? `已导出 ${result.count} 条评分，但存档写入曾失败，文件可能不完整`
-      : `已导出 ${result.count} 条评分`, result.incomplete ? 'error' : 'success', 8000);
+      ? `已导出 ${result.count} 条播放记录，但存档写入曾失败，文件可能不完整`
+      : `已导出 ${result.count} 条播放记录`, result.incomplete ? 'error' : 'success', 8000);
   } catch (error) {
     showToast(`导出失败：${error.message}`, 'error');
   }
@@ -863,11 +951,13 @@ function setupMediaEvents() {
   const media = elements.mediaElement;
   setOutputVolume(elements.volumeInput.value, false);
   media.addEventListener('play', () => {
+    if (isFoobarTrack()) return;
     elements.playButton.textContent = 'Ⅱ';
     elements.programFrame.classList.add('playing');
     publishBackstageState();
   });
   media.addEventListener('pause', () => {
+    if (isFoobarTrack()) return;
     elements.playButton.textContent = '▶';
     elements.programFrame.classList.remove('playing');
     publishBackstageState();
@@ -875,10 +965,15 @@ function setupMediaEvents() {
   media.addEventListener('loadedmetadata', () => {
     const track = currentTrack();
     if (track && Number.isFinite(media.duration)) track.duration = media.duration;
+    if (isFoobarTrack()) {
+      if (state.foobarState) syncShadowPlayback(state.foobarState);
+      return;
+    }
     elements.durationTime.textContent = formatTime(media.duration);
     renderPlaylist();
   });
   media.addEventListener('timeupdate', () => {
+    if (isFoobarTrack()) return;
     elements.currentTime.textContent = formatTime(media.currentTime);
     const progress = media.duration ? Math.round((media.currentTime / media.duration) * 1000) : 0;
     elements.progressInput.value = String(progress);
@@ -888,10 +983,19 @@ function setupMediaEvents() {
     }
   });
   media.addEventListener('ended', () => {
-    archive({ type: 'track_completed', roundId: currentTrack()?.roundId, trackTitle: currentTrack()?.title });
-    goRelative(1);
+    if (isFoobarTrack()) return;
+    const track = currentTrack();
+    if (!track) return;
+    archive({ type: 'track_completed', roundId: track.roundId, trackTitle: track.title });
+    updatePlaybackDisplay(media.duration || track.duration || 0, media.duration || track.duration || 0, true);
   });
   media.addEventListener('error', () => {
+    if (isFoobarTrack()) {
+      if (state.shadowAnalysisUnavailable) return;
+      state.shadowAnalysisUnavailable = true;
+      showToast('当前音频无法用于实时频谱分析，已改用动态效果', 'info', 6000);
+      return;
+    }
     const code = media.error?.code || '?';
     showToast(`媒体无法播放（错误 ${code}），可能是不支持的编码格式`, 'error', 6000);
   });
@@ -928,6 +1032,9 @@ async function handleBackstageCommand(command) {
       await loadTrack(index, true);
       break;
     }
+    case 'reorder-track':
+      reorderTrack(String(payload.id || ''), String(payload.targetId || ''), payload.placement);
+      break;
     case 'play-pause':
       await togglePlayback();
       break;
@@ -938,14 +1045,19 @@ async function handleBackstageCommand(command) {
       goRelative(1);
       break;
     case 'seek': {
-      const duration = elements.mediaElement.duration;
+      const duration = playbackDuration();
       if (Number.isFinite(duration) && duration > 0) {
         const progress = Math.max(0, Math.min(1000, Number(payload.progress) || 0));
-        elements.mediaElement.currentTime = duration * progress / 1000;
+        if (progress < 1000) { state.foobarCompletedId = ''; state.foobarWasPlaying = false; }
+        if (isFoobarTrack() && state.foobarTrackId) await externalCommand('seek', { seconds: duration * progress / 1000 });
+        else if (!isFoobarTrack()) elements.mediaElement.currentTime = duration * progress / 1000;
         publishBackstageState();
       }
       break;
     }
+    case 'audio-engine':
+      await setAudioEngine(payload.engine);
+      break;
     case 'volume': {
       setOutputVolume(payload.value);
       break;
@@ -953,12 +1065,6 @@ async function handleBackstageCommand(command) {
     case 'comment-opacity':
       setCommentOpacity(payload.value);
       break;
-    case 'submit-score': {
-      const message = String(payload.message || '').trim();
-      if (!message) throw new Error('请输入评分');
-      emitLocalScore(String(payload.name || '').trim() || '测试观众', message);
-      break;
-    }
     case 'leave-program':
       leaveProgramMode();
       break;
@@ -970,6 +1076,12 @@ async function handleBackstageCommand(command) {
 function setupVisualizer() {
   const canvas = elements.visualizer;
   const context = canvas.getContext('2d');
+  const barCount = 48;
+  const noiseGate = .12;
+  const peakThreshold = .95;
+  const displayCeiling = .9;
+  const displayedLevels = new Float32Array(barCount);
+  let spectrumValues = null;
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
     const ratio = window.devicePixelRatio || 1;
@@ -984,25 +1096,53 @@ function setupVisualizer() {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
     context.clearRect(0, 0, width, height);
-    const barCount = 26;
     let values;
-    if (state.analyser) {
-      values = new Uint8Array(state.analyser.frequencyBinCount);
-      state.analyser.getByteFrequencyData(values);
+    if (state.analyser && state.audioContext?.state === 'running'
+      && !playbackPaused() && (!isFoobarTrack() || (!state.shadowAnalysisUnavailable && !elements.mediaElement.paused))) {
+      if (!spectrumValues || spectrumValues.length !== state.analyser.frequencyBinCount) {
+        spectrumValues = new Uint8Array(state.analyser.frequencyBinCount);
+      }
+      state.analyser.getByteFrequencyData(spectrumValues);
+      values = spectrumValues;
     }
-    const gap = 3;
+    const gap = 2;
     const barWidth = Math.max(2, (width - gap * (barCount - 1)) / barCount);
+    const centerY = height / 2;
+    const maxHalfHeight = height * .45;
+    const moving = isFoobarTrack() && !playbackPaused();
+    const fallback = moving && state.shadowAnalysisUnavailable;
+    const analyser = state.analyser;
+    const binWidth = analyser && state.audioContext ? state.audioContext.sampleRate / analyser.fftSize : 0;
+    const maxHz = state.audioContext ? Math.min(14000, state.audioContext.sampleRate / 2) : 14000;
     for (let i = 0; i < barCount; i += 1) {
-      const sampleIndex = values ? Math.floor((i / barCount) * values.length * 0.72) : 0;
-      const idle = (Math.sin(now / 520 + i * .6) + 1) * .05 + .05;
-      const ratio = values ? Math.max(.035, values[sampleIndex] / 255) : idle;
-      const barHeight = Math.max(2, ratio * height * .9);
-      const gradient = context.createLinearGradient(0, height - barHeight, 0, height);
-      gradient.addColorStop(0, state.theme.color);
-      gradient.addColorStop(1, '#ff674d');
-      context.fillStyle = gradient;
+      const idle = fallback
+        ? .18 + .48 * Math.pow((Math.sin(now / 260 + i * .58) + 1) / 2, 2)
+        : (Math.sin(now / 520 + i * .6) + 1) * .025 + .025;
+      let target = idle;
+      if (values && binWidth > 0) {
+        const lowHz = 40 * Math.pow(maxHz / 40, i / barCount);
+        const highHz = 40 * Math.pow(maxHz / 40, (i + 1) / barCount);
+        const first = Math.min(values.length - 1, Math.max(1, Math.floor(lowHz / binWidth)));
+        const last = Math.min(values.length, Math.max(first + 1, Math.ceil(highHz / binWidth)));
+        let power = 0;
+        let peak = 0;
+        for (let bin = first; bin < last; bin += 1) {
+          const sample = values[bin] / 255;
+          power += sample * sample;
+          peak = Math.max(peak, sample);
+        }
+        const energy = .72 * Math.sqrt(power / (last - first)) + .28 * peak;
+        const gated = Math.max(0, Math.min(1, (energy - noiseGate) / (peakThreshold - noiseGate)));
+        target = Math.pow(gated, 1.05) * displayCeiling;
+      }
+      const previous = displayedLevels[i];
+      displayedLevels[i] = previous + (target - previous) * (target > previous ? .78 : .18);
+      const ratio = Math.max(.025, displayedLevels[i]);
+      const halfBarHeight = Math.max(1, ratio * maxHalfHeight);
+      const x = i * (barWidth + gap);
+      context.fillStyle = 'rgba(255, 255, 255, .8)';
       context.beginPath();
-      context.roundRect(i * (barWidth + gap), height - barHeight, barWidth, barHeight, 2);
+      context.roundRect(x, centerY - halfBarHeight, barWidth, halfBarHeight * 2, 2);
       context.fill();
     }
     requestAnimationFrame(draw);
@@ -1056,21 +1196,37 @@ function bindEvents() {
   });
   elements.saveTrackMetadataButton.addEventListener('click', saveTrackMetadata);
   elements.playButton.addEventListener('click', togglePlayback);
+  elements.audioEngineSelect.addEventListener('change', () => {
+    setAudioEngine(elements.audioEngineSelect.value).catch((error) => showToast(`切换播放器失败：${error.message}`, 'error', 7000));
+  });
   elements.previousButton.addEventListener('click', () => goRelative(-1));
   elements.nextButton.addEventListener('click', () => goRelative(1));
   elements.progressInput.addEventListener('input', () => {
-    if (elements.mediaElement.duration) {
+    if (isFoobarTrack()) elements.currentTime.textContent = formatTime(Number(elements.progressInput.value) / 1000 * playbackDuration());
+    else if (elements.mediaElement.duration) {
       elements.mediaElement.currentTime = (Number(elements.progressInput.value) / 1000) * elements.mediaElement.duration;
+    }
+  });
+  elements.progressInput.addEventListener('pointerdown', () => { state.seekDragging = true; });
+  elements.progressInput.addEventListener('pointerup', () => { state.seekDragging = false; });
+  elements.progressInput.addEventListener('change', () => {
+    state.seekDragging = false;
+    if (isFoobarTrack() && state.foobarTrackId && playbackDuration()) {
+      if (Number(elements.progressInput.value) < 1000) {
+        state.foobarCompletedId = '';
+        state.foobarWasPlaying = false;
+      }
+      externalCommand('seek', { seconds: Number(elements.progressInput.value) / 1000 * playbackDuration() })
+        .catch((error) => showToast(`定位失败：${error.message}`, 'error'));
     }
   });
   elements.volumeInput.addEventListener('input', () => {
     setOutputVolume(elements.volumeInput.value);
   });
+  elements.volumeInput.addEventListener('pointerdown', () => { state.volumeDragging = true; });
+  elements.volumeInput.addEventListener('pointerup', () => { state.volumeDragging = false; });
+  elements.volumeInput.addEventListener('change', () => { state.volumeDragging = false; });
   elements.commentOpacityInput.addEventListener('input', () => setCommentOpacity(elements.commentOpacityInput.value));
-  elements.sendMockButton.addEventListener('click', submitLocalScore);
-  elements.mockMessageInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') submitLocalScore();
-  });
   elements.exportButton.addEventListener('click', exportArchive);
   elements.programModeButton.addEventListener('click', enterProgramMode);
   elements.programFrame.addEventListener('dblclick', () => {
@@ -1096,8 +1252,14 @@ function bindEvents() {
   });
 
   api.onBackstageUpdate(applyBackstageUpdate);
+  api.onFoobarState((next) => {
+    if (state.audioEngine === 'foobar') applyFoobarState(next);
+  });
   api.onBackstageCommand((command) => {
-    handleBackstageCommand(command).catch((error) => showToast(error.message, 'error', 6000));
+    handleBackstageCommand(command).catch((error) => {
+      showToast(error.message, 'error', 6000);
+      api.sendBackstageFeedback(error.message, 'error').catch(() => {});
+    });
   });
   api.onStreamStartCapture((payload) => {
     startStreamCapture(payload).catch((error) => api.sendStreamCaptureError(payload.id, error.message));
@@ -1107,9 +1269,12 @@ function bindEvents() {
 
 async function initialize() {
   const query = new URLSearchParams(window.location.search);
+  elements.audioEngineSelect.value = state.audioEngine;
+  state.titleResizeObserver = new ResizeObserver(refreshTrackTitleScroll);
+  state.titleResizeObserver.observe(elements.trackTitle);
+  refreshTrackTitleScroll();
   setCommentOpacity(localStorage.getItem('commentPanelOpacity') ?? 72, false);
   renderPlaylist();
-  renderScore();
   setupMediaEvents();
   setupVisualizer();
   setupDragAndDrop();
@@ -1132,17 +1297,13 @@ async function initialize() {
     const qaVideo = query.get('video') === '1';
     await addTracks([{
       id: 'qa-track', path: 'qa-demo.wav', url: URL.createObjectURL(new Blob([silentWav], { type: 'audio/wav' })),
-      type: qaVideo ? 'video' : 'audio', title: qaVideo ? 'Midnight Session' : 'Night Signal', artist: 'The Afterglow', album: 'QA Demo', duration: 1,
+      type: qaVideo ? 'video' : 'audio', title: qaVideo ? 'Midnight Session' : 'Night Signal', artist: 'The Afterglow', composer: 'The Afterglow', album: 'QA Demo', duration: 1,
       submitter: '凌晨四点投稿',
       description: '一首从城市夜色里长出来的歌。留意后半段逐层叠起的低频与合成器。',
       descriptionVisible: true,
       coverDataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
       posterDataUrl: qaVideo ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><defs><linearGradient id="v" x2="1" y2="1"><stop stop-color="#17204d"/><stop offset=".52" stop-color="#60305c"/><stop offset="1" stop-color="#df6c59"/></linearGradient></defs><rect width="1600" height="900" fill="url(#v)"/><circle cx="1220" cy="230" r="130" fill="#ffd98a" opacity=".9"/><path d="M0 690L270 470 500 650 780 340 1120 720 1400 500 1600 650V900H0Z" fill="#10131e"/><text x="90" y="120" font-family="sans-serif" font-size="36" fill="white" opacity=".7">MIDNIGHT SESSION</text></svg>`)}` : '',
     }]);
-    processScoreInput({ open_id: 'qa-1', uname: '银河汽水', msg: '#01 9.2', msg_id: 'qa-score-1' });
-    processScoreInput({ open_id: 'qa-2', uname: '纸飞机', msg: '#01 8.5', msg_id: 'qa-score-2' });
-    processScoreInput({ open_id: 'qa-3', uname: '低频收藏家', msg: '#01 7.8', msg_id: 'qa-score-3' });
-    processScoreInput({ open_id: 'qa-1', uname: '银河汽水', msg: '#01 9.7', msg_id: 'qa-score-1-revised' });
     if (qaVideo) setCommentOpacity(46, false);
   }
   if (query.get('program') === '1') {

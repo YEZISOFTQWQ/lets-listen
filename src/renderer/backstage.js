@@ -5,10 +5,10 @@ const ids = [
   'trackCount', 'importButton', 'openPlaylistButton', 'savePlaylistButton', 'exportButton', 'playlist', 'exitProgramButton',
   'previousButton', 'playButton', 'nextButton', 'playingLabel', 'currentTime',
   'progressInput', 'durationTime', 'volumeInput', 'volumeValue',
+  'audioEngineSelect', 'chooseFoobarButton',
   'commentOpacityInput', 'commentOpacityValue', 'trackSelect', 'currentIndicator',
   'titleInput', 'composerInput', 'submitterInput', 'genreInput', 'coverState', 'chooseCoverButton', 'clearCoverButton',
-  'descriptionInput', 'visibleInput', 'saveButton', 'mockNameInput',
-  'mockMessageInput', 'sendMockButton', 'status',
+  'descriptionInput', 'visibleInput', 'saveButton', 'status',
   'streamStatus', 'ffmpegPathInput', 'ffmpegStatus', 'streamQualityInput',
   'streamServerInput', 'streamKeyInput', 'streamTestButton', 'streamStartButton', 'streamStopButton',
 ];
@@ -22,6 +22,27 @@ let editRevision = 0;
 let playlistSignature = '';
 let dragDepth = 0;
 let themeSignature = '';
+let progressDragging = false;
+let volumeDragging = false;
+let draggedTrackId = '';
+let suppressPlaylistClick = false;
+
+function clearDropHints() {
+  for (const item of elements.playlist.querySelectorAll('.drop-before, .drop-after')) {
+    item.classList.remove('drop-before', 'drop-after');
+  }
+}
+
+function finishTrackDrag() {
+  draggedTrackId = '';
+  clearDropHints();
+  for (const item of elements.playlist.querySelectorAll('.drag-source')) item.classList.remove('drag-source');
+  window.setTimeout(() => { suppressPlaylistClick = false; }, 0);
+}
+
+function isFileDrag(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files');
+}
 
 function formatTime(value) {
   const seconds = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -38,8 +59,8 @@ function setStatus(message, error = false) {
 }
 
 function renderTheme(accent, hover) {
-  const color = /^#[0-9a-f]{6}$/i.test(accent) ? accent : '#d8ff3e';
-  const hoverColor = /^#[0-9a-f]{6}$/i.test(hover) ? hover : '#e5ff72';
+  const color = /^#[0-9a-f]{6}$/i.test(accent) ? accent : '#ffffff';
+  const hoverColor = /^#[0-9a-f]{6}$/i.test(hover) ? hover : '#e9e9e9';
   const signature = `${color}:${hoverColor}`;
   if (signature === themeSignature) return;
   themeSignature = signature;
@@ -76,6 +97,11 @@ function renderPlaylist() {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `playlist-item${track.id === snapshot.currentTrackId ? ' active' : ''}`;
+    const handle = document.createElement('span');
+    handle.className = 'playlist-drag-handle';
+    handle.draggable = true;
+    handle.textContent = '⠿';
+    handle.title = '拖动调整播放顺序';
     const number = document.createElement('span');
     number.className = 'playlist-number';
     number.textContent = track.number;
@@ -89,8 +115,39 @@ function renderPlaylist() {
     const duration = document.createElement('span');
     duration.className = 'playlist-duration';
     duration.textContent = track.duration ? formatTime(track.duration) : '--:--';
-    button.append(number, copy, duration);
-    button.addEventListener('click', () => command('select-track', { id: track.id }));
+    button.append(handle, number, copy, duration);
+    handle.addEventListener('click', (event) => event.stopPropagation());
+    handle.addEventListener('dragstart', (event) => {
+      draggedTrackId = track.id;
+      suppressPlaylistClick = true;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', track.id);
+      button.classList.add('drag-source');
+    });
+    handle.addEventListener('dragend', finishTrackDrag);
+    button.addEventListener('dragover', (event) => {
+      if (!draggedTrackId || draggedTrackId === track.id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      clearDropHints();
+      const middle = button.getBoundingClientRect().top + button.getBoundingClientRect().height / 2;
+      button.classList.add(event.clientY < middle ? 'drop-before' : 'drop-after');
+    });
+    button.addEventListener('dragleave', () => button.classList.remove('drop-before', 'drop-after'));
+    button.addEventListener('drop', (event) => {
+      if (!draggedTrackId || draggedTrackId === track.id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const middle = button.getBoundingClientRect().top + button.getBoundingClientRect().height / 2;
+      const placement = event.clientY < middle ? 'before' : 'after';
+      const sourceId = draggedTrackId;
+      finishTrackDrag();
+      command('reorder-track', { id: sourceId, targetId: track.id, placement });
+    });
+    button.addEventListener('click', () => {
+      if (!suppressPlaylistClick) command('select-track', { id: track.id });
+    });
     elements.playlist.appendChild(button);
   }
 }
@@ -158,17 +215,18 @@ function render(snapshotNext) {
   elements.playingLabel.textContent = current
     ? `TRACK ${current.number} · ${current.title}` : '尚未选择曲目';
   elements.playButton.textContent = playback.paused ? '▶' : 'Ⅱ';
+  elements.audioEngineSelect.value = playback.audioEngine || 'foobar';
   for (const id of ['previousButton', 'playButton', 'nextButton', 'progressInput']) {
     elements[id].disabled = !hasTrack;
   }
   elements.exitProgramButton.disabled = !playback.programMode;
   elements.currentTime.textContent = formatTime(playback.currentTime);
   elements.durationTime.textContent = formatTime(playback.duration);
-  if (document.activeElement !== elements.progressInput) {
+  if (!progressDragging) {
     elements.progressInput.value = playback.duration
       ? String(Math.round(playback.currentTime / playback.duration * 1000)) : '0';
   }
-  if (document.activeElement !== elements.volumeInput) elements.volumeInput.value = String(playback.volume ?? 0.85);
+  if (!volumeDragging) elements.volumeInput.value = String(playback.volume ?? 0.85);
   elements.volumeValue.value = `${Math.round(Number(elements.volumeInput.value) * 100)}%`;
   if (document.activeElement !== elements.commentOpacityInput) {
     elements.commentOpacityInput.value = String(playback.commentOpacity ?? 72);
@@ -287,7 +345,7 @@ elements.exportButton.addEventListener('click', async () => {
     const result = await api.exportArchiveCsv(snapshot.sessionId);
     if (result) setStatus(result.incomplete
       ? `已导出 ${result.count} 条，但存档写入曾失败，文件可能不完整`
-      : `已导出 ${result.count} 条评分`, Boolean(result.incomplete));
+      : `已导出 ${result.count} 条播放记录`, Boolean(result.incomplete));
   } catch (error) {
     setStatus(`导出失败：${error.message}`, true);
   }
@@ -296,16 +354,30 @@ elements.previousButton.addEventListener('click', () => command('previous'));
 elements.playButton.addEventListener('click', () => command('play-pause'));
 elements.nextButton.addEventListener('click', () => command('next'));
 elements.exitProgramButton.addEventListener('click', () => command('leave-program'));
+elements.audioEngineSelect.addEventListener('change', () => command('audio-engine', { engine: elements.audioEngineSelect.value }));
+elements.chooseFoobarButton.addEventListener('click', async () => {
+  try {
+    const selected = await api.chooseFoobar();
+    if (selected) setStatus(`已选择 foobar2000：${selected}`);
+  } catch (error) { setStatus(error.message, true); }
+});
 elements.progressInput.addEventListener('input', () => {
   const duration = snapshot.playback?.duration || 0;
   elements.currentTime.textContent = formatTime(duration * Number(elements.progressInput.value) / 1000);
 });
-elements.progressInput.addEventListener('change', () =>
-  command('seek', { progress: Number(elements.progressInput.value) }));
+elements.progressInput.addEventListener('pointerdown', () => { progressDragging = true; });
+elements.progressInput.addEventListener('pointerup', () => { progressDragging = false; });
+elements.progressInput.addEventListener('change', () => {
+  progressDragging = false;
+  command('seek', { progress: Number(elements.progressInput.value) });
+});
 elements.volumeInput.addEventListener('input', () => {
   elements.volumeValue.value = `${Math.round(Number(elements.volumeInput.value) * 100)}%`;
   command('volume', { value: Number(elements.volumeInput.value) });
 });
+elements.volumeInput.addEventListener('pointerdown', () => { volumeDragging = true; });
+elements.volumeInput.addEventListener('pointerup', () => { volumeDragging = false; });
+elements.volumeInput.addEventListener('change', () => { volumeDragging = false; });
 elements.commentOpacityInput.addEventListener('input', () => {
   elements.commentOpacityValue.value = `${elements.commentOpacityInput.value}%`;
   command('comment-opacity', { value: Number(elements.commentOpacityInput.value) });
@@ -366,15 +438,6 @@ elements.visibleInput.addEventListener('change', () => {
   saveMetadata();
 });
 elements.saveButton.addEventListener('click', saveMetadata);
-elements.sendMockButton.addEventListener('click', () => {
-  const message = elements.mockMessageInput.value.trim();
-  if (!message) return;
-  command('submit-score', { name: elements.mockNameInput.value.trim(), message });
-  elements.mockMessageInput.value = '';
-});
-elements.mockMessageInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') elements.sendMockButton.click();
-});
 elements.ffmpegPathInput.value = localStorage.getItem('ffmpegPath') || '';
 elements.ffmpegPathInput.addEventListener('change', () => {
   localStorage.setItem('ffmpegPath', elements.ffmpegPathInput.value.trim());
@@ -404,17 +467,30 @@ elements.streamStopButton.addEventListener('click', async () => {
   }
 });
 window.addEventListener('dragenter', (event) => {
+  if (!isFileDrag(event)) return;
   event.preventDefault();
   dragDepth += 1;
   document.body.classList.add('dragging');
 });
-window.addEventListener('dragover', (event) => event.preventDefault());
+window.addEventListener('dragover', (event) => {
+  if (draggedTrackId) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'none';
+  } else if (isFileDrag(event)) event.preventDefault();
+});
 window.addEventListener('dragleave', (event) => {
+  if (!isFileDrag(event)) return;
   event.preventDefault();
   dragDepth = Math.max(0, dragDepth - 1);
   if (!dragDepth) document.body.classList.remove('dragging');
 });
 window.addEventListener('drop', (event) => {
+  if (draggedTrackId) {
+    event.preventDefault();
+    finishTrackDrag();
+    return;
+  }
+  if (!isFileDrag(event)) return;
   event.preventDefault();
   dragDepth = 0;
   document.body.classList.remove('dragging');

@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('backstageApi', {
   getState: () => ipcRenderer.invoke('backstage:get-state'),
+  chooseFoobar: () => ipcRenderer.invoke('foobar:choose-executable'),
   updateTrack: (update) => ipcRenderer.invoke('backstage:update-track', update),
   command: (type, payload) => ipcRenderer.invoke('backstage:command', { type, payload }),
   selectMedia: () => ipcRenderer.invoke('media:select'),
