@@ -8,3 +8,14 @@ qa-*.png
 .env
 .env.*
 !.env.example
+
+# Local media, covers, playlists, and spreadsheet metadata.
+/music_list/
+
+# Local-only test files and test automation.
+/test/
+/scripts/
+**/__tests__/
+**/*.test.*
+**/*.spec.*
+/coverage/

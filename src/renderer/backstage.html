@@ -12,20 +12,21 @@
     <header>
       <span class="eyebrow">LETS-LISTEN · BACKSTAGE</span>
       <h1>直播后台</h1>
-      <p>在这里操作播放、评分与推流；也可以由 OBS 采集主节目窗口。</p>
+      <p>在这里操作播放、曲目信息与推流；也可以由 OBS 采集主节目窗口。</p>
     </header>
     <section class="panel">
       <div class="panel-heading">
         <h2>播放队列 <span id="trackCount">0 首</span></h2>
         <div class="button-group">
           <button id="importButton" class="primary" type="button">＋ 导入音频 / 视频</button>
-          <button id="exportButton" type="button">导出存档</button>
+          <button id="exportButton" type="button">导出播放记录</button>
         </div>
       </div>
       <div class="button-group playlist-file-actions">
         <button id="openPlaylistButton" type="button">导入歌单</button>
         <button id="savePlaylistButton" type="button" disabled>保存歌单</button>
       </div>
+      <p class="hint">拖动曲目前的把手可调整播放顺序；当前歌曲不会中断。</p>
       <div id="playlist" class="playlist"><p>请导入音频或视频文件</p></div>
     </section>
     <section class="panel">
@@ -33,6 +34,16 @@
         <h2>播放控制</h2>
         <button id="exitProgramButton" type="button">退出节目模式</button>
       </div>
+      <div class="engine-row">
+        <label>音频播放器
+          <select id="audioEngineSelect">
+            <option value="builtin">内置播放器</option>
+            <option value="foobar" selected>foobar2000</option>
+          </select>
+        </label>
+        <button id="chooseFoobarButton" type="button">选择 foobar2000 程序</button>
+      </div>
+      <p class="hint">外部播放器模式仅用于音频；视频仍由内置播放器播放。foobar2000 需安装 Beefweb Remote Control 组件，并在 Music directories 中添加歌曲文件夹；接口使用本机 127.0.0.1:8880。可随时切回内置播放器。</p>
       <div class="transport">
         <button id="previousButton" type="button" aria-label="上一首">‹</button>
         <button id="playButton" class="primary" type="button" aria-label="播放或暂停">▶</button>
@@ -50,7 +61,7 @@
         <output id="volumeValue">85%</output>
       </label>
       <label class="slider-row named-slider">
-        <span>信息卡底色</span>
+        <span>视频信息卡底色</span>
         <input id="commentOpacityInput" type="range" min="0" max="100" step="1" value="72">
         <output id="commentOpacityValue">72%</output>
       </label>
@@ -98,14 +109,6 @@
         </label>
       </div>
       <button id="saveButton" class="primary wide" type="button" disabled>保存曲目信息</button>
-    </section>
-    <section class="panel">
-      <h2>本地评分</h2>
-      <div class="mock-row">
-        <label class="field"><span>评分人</span><input id="mockNameInput" value="测试观众" maxlength="20"></label>
-        <label class="field"><span>评分</span><input id="mockMessageInput" placeholder="#01 8.5 或 评分 8.5"></label>
-        <button id="sendMockButton" class="primary" type="button">提交评分</button>
-      </div>
     </section>
     <section class="panel">
       <div class="panel-heading">

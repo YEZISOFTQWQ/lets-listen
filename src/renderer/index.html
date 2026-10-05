@@ -27,6 +27,12 @@
       </div>
       <button id="editTrackButton" class="ghost-button wide-button edit-track-button" type="button" disabled>编辑当前曲目信息</button>
       <button id="backstageButton" class="ghost-button wide-button edit-track-button" type="button">打开直播后台</button>
+      <label class="audio-engine-control control-surface">音频播放器
+        <select id="audioEngineSelect" aria-label="音频播放器">
+          <option value="builtin">内置播放器</option>
+          <option value="foobar" selected>foobar2000</option>
+        </select>
+      </label>
 
       <div class="section-heading">
         <span>播放队列</span>
@@ -49,51 +55,47 @@
           <strong>直播节目画面</strong>
         </div>
         <div class="top-actions">
-          <button id="exportButton" class="ghost-button" type="button">导出存档</button>
+          <button id="exportButton" class="ghost-button" type="button">导出播放记录</button>
           <button id="programModeButton" class="primary-button" type="button">进入节目模式</button>
         </div>
       </header>
 
       <section id="programFrame" class="program-frame no-media">
-        <div class="ambient ambient-one"></div>
-        <div class="ambient ambient-two"></div>
         <div class="cover-ambient" aria-hidden="true"><img id="coverBackdropImage" alt=""></div>
         <video id="mediaElement" class="stage-video" playsinline></video>
 
         <div class="program-content">
-          <section class="track-zone">
-            <div class="track-pill">TRACK <span id="trackNumber">--</span></div>
-            <div id="coverFrame" class="cover-frame">
-              <div id="coverFallback" class="cover-fallback">
-                <div class="record-disc"><div></div></div>
-                <span>DROP A TRACK</span>
+          <div class="stage-main">
+            <section class="track-zone">
+              <div class="track-pill">TRACK <span id="trackNumber">--</span></div>
+              <div id="coverFrame" class="cover-frame">
+                <div id="coverFallback" class="cover-fallback">
+                  <div class="record-disc"><div></div></div>
+                  <span>DROP A TRACK</span>
+                </div>
+                <img id="coverImage" alt="当前曲目封面">
               </div>
-              <img id="coverImage" alt="当前曲目封面">
-            </div>
-            <div class="track-info-card">
-              <div class="track-credits">
-                <div><span>投稿人</span><strong id="trackSubmitter">待填写</strong></div>
-                <div><span>曲风</span><strong id="trackGenre">待填写</strong></div>
+              <div class="track-info-card">
+                <div class="now-playing">
+                  <h2 id="trackTitle"><span id="trackTitleText">等待选曲</span></h2>
+                  <p id="trackArtist">导入音频或视频开始品味大战</p>
+                  <div class="disc-title-line"><span class="mini-disc" aria-hidden="true"></span><strong id="trackTitleRepeat">等待选曲</strong></div>
+                </div>
               </div>
-              <div class="now-playing">
-                <span>NOW PLAYING</span>
-                <h2 id="trackTitle">等待选曲</h2>
-                <p id="trackArtist">导入音频或视频开始品味大战</p>
-              </div>
-            </div>
-            <canvas id="visualizer" aria-label="音频频谱"></canvas>
-          </section>
+              <canvas id="visualizer" aria-label="音频频谱"></canvas>
+            </section>
 
-          <section class="interaction-zone">
-            <div class="score-card">
-              <div class="score-main">
-                <strong id="averageScore">—</strong>
-              </div>
-            </div>
+            <section class="interaction-zone">
+              <div id="trackSubmitter" class="submitter-name">投稿人待填写</div>
 
-            <div id="descriptionCard" class="description-card" hidden>
-              <div id="descriptionScroll" class="description-scroll"></div>
-            </div>
+              <div id="descriptionCard" class="description-card" hidden>
+                <div id="descriptionScroll" class="description-scroll"></div>
+              </div>
+            </section>
+          </div>
+          <section class="tag-zone" aria-label="曲风标签">
+            <h3>Tag</h3>
+            <div id="trackGenreDisplay" class="tag-content" hidden></div>
           </section>
         </div>
 
@@ -111,22 +113,11 @@
           <span id="durationTime">00:00</span>
           <span class="volume-label">音量</span>
           <input id="volumeInput" class="range-input volume-input" type="range" min="0" max="1.25" value="0.85" step="0.01" aria-label="音量，最高 125%">
-          <span class="opacity-label">信息卡底色</span>
-          <input id="commentOpacityInput" class="range-input opacity-input" type="range" min="0" max="100" value="72" step="1" aria-label="节目画面信息卡透明度">
+          <span class="opacity-label">视频信息卡底色</span>
+          <input id="commentOpacityInput" class="range-input opacity-input" type="range" min="0" max="100" value="72" step="1" aria-label="视频画面信息卡透明度">
           <output id="commentOpacityValue" class="opacity-value">72%</output>
         </div>
 
-        <div class="test-row">
-          <label class="compact-field">
-            <span>评分人</span>
-            <input id="mockNameInput" value="测试观众" maxlength="20">
-          </label>
-          <label class="mock-message-field">
-            <span>评分</span>
-            <input id="mockMessageInput" placeholder="#01 8.5 或 评分 8.5">
-          </label>
-          <button id="sendMockButton" class="secondary-button" type="button">提交评分</button>
-        </div>
       </section>
     </main>
   </div>
@@ -188,7 +179,6 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
-  <script src="command-parser.js"></script>
   <script src="cover-validation.js"></script>
   <script src="app.js"></script>
 </body>

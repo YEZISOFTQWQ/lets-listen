@@ -8,19 +8,25 @@ const { ArchiveStore } = require('./lib/archive-store.cjs');
 const { StreamController, findFfmpeg } = require('./lib/stream-controller.cjs');
 const { inspectMediaFiles, readCoverFile, MAX_COVER_BYTES } = require('./lib/media-inspector.cjs');
 const { savePlaylistFile, loadPlaylistFile } = require('./lib/playlist-store.cjs');
+const { FoobarController } = require('./lib/foobar-controller.cjs');
 
 let mainWindow;
 let backstageWindow;
 let backstageState = {
   currentTrackId: '',
   tracks: [],
-  themeAccent: '#d8ff3e',
-  themeHover: '#e5ff72',
-  playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, commentOpacity: 72, programMode: false },
+  themeAccent: '#ffffff',
+  themeHover: '#e9e9e9',
+  playback: { currentTime: 0, duration: 0, paused: true, volume: 0.85, audioEngine: 'foobar', commentOpacity: 72, programMode: false },
   sessionId: '',
 };
 let archiveStore;
 const streamController = new StreamController();
+let foobarExecutable = 'D:\\Program Files\\foobar2000\\foobar2000.exe';
+function foobarConfigPath() {
+  return path.join(app.getPath('userData'), 'foobar-config.json');
+}
+const foobar = new FoobarController((state) => sendToRenderer('foobar:state', state));
 let activeCaptureId = '';
 let captureStartTimer;
 let captureStopTimer;
@@ -118,6 +124,7 @@ function createWindow() {
     }
   });
   mainWindow.on('closed', () => {
+    foobar.close().catch((error) => console.error('foobar2000 close failed', error));
     if (streamController.starting || streamController.child) {
       streamController.abort('节目窗口已关闭，推流结束');
     }
@@ -180,7 +187,6 @@ function createWindow() {
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
               trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
               coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
-              scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
               descriptionVisible: getComputedStyle(card).display !== 'none' };
           })()`);
           if (!result.text.startsWith('这是一段') || result.hidden || result.oldCard
@@ -188,7 +194,7 @@ function createWindow() {
             || result.scrollTop <= 0) {
             throw new Error(`简介区未能滚动: ${JSON.stringify(result)}`);
           }
-          if (qaVideo && (!result.videoMode || !result.trackVisible || !result.coverHidden || !result.scoreVisible
+          if (qaVideo && (!result.videoMode || !result.trackVisible || !result.coverHidden
             || !result.descriptionVisible)) {
             throw new Error(`视频模式叠层布局错误: ${JSON.stringify(result)}`);
           }
@@ -266,7 +272,6 @@ function createWindow() {
               ambientHidden: getComputedStyle(document.querySelector('.ambient')).display === 'none',
               trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
               coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
-              scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
               descriptionVisible: getComputedStyle(document.querySelector('.description-card')).display !== 'none',
               controlsHidden: getComputedStyle(document.querySelector('.control-surface')).display === 'none',
               description: document.getElementById('descriptionScroll').textContent,
@@ -275,7 +280,7 @@ function createWindow() {
           })()`);
           if (result.paused || result.time <= 0 || result.width < 640 || result.height < 360
             || !result.videoMode || !result.videoVisible || !result.ambientHidden
-             || !result.trackVisible || !result.coverHidden || !result.scoreVisible
+             || !result.trackVisible || !result.coverHidden
             || !result.descriptionVisible
             || !result.controlsHidden
             || result.description !== '视频画面中的歌曲简介' || result.opacity !== '0.46') {
@@ -391,12 +396,11 @@ function createWindow() {
               videoMode: document.getElementById('programFrame').classList.contains('video-mode'),
                trackVisible: getComputedStyle(document.querySelector('.track-zone')).display !== 'none',
                coverHidden: getComputedStyle(document.querySelector('.cover-frame')).display === 'none',
-               scoreVisible: getComputedStyle(document.querySelector('.score-card')).display !== 'none',
               descriptionVisible: getComputedStyle(document.querySelector('.description-card')).display !== 'none',
               description: document.getElementById('descriptionScroll').textContent,
             }))()`);
             if (video.width < 640 || video.height < 360 || !video.videoMode
-               || !video.trackVisible || !video.coverHidden || !video.scoreVisible || !video.descriptionVisible
+               || !video.trackVisible || !video.coverHidden || !video.descriptionVisible
               || video.description !== '视频推流简介') {
               throw new Error(`推流视频模式异常：${JSON.stringify(video)}`);
             }
@@ -469,20 +473,17 @@ function createWindow() {
           await mainWindow.webContents.executeJavaScript('state.archiveQueue');
           const sessionId = backstageState.sessionId;
           if (!sessionId) throw new Error('未创建测试存档');
-          archiveStore.append = (id, entry) => entry?.type === 'score' && entry.msgId === 'qa-archive-fail'
+          archiveStore.append = (id, entry) => entry?.type === 'track_metadata_updated' && entry.trackTitle === 'qa-archive-fail'
             ? Promise.reject(new Error('QA 模拟磁盘写入失败'))
             : originalAppend.call(archiveStore, id, entry);
           const observed = await mainWindow.webContents.executeJavaScript(`(async () => {
-            processScoreInput({ open_id: 'qa-archive-viewer', uname: '存档测试观众',
-              msg: '#01 8.1', msg_id: 'qa-archive-fail' });
+            archive({ type: 'track_metadata_updated', roundId: '01', trackTitle: 'qa-archive-fail' });
             await state.archiveQueue;
             return { error: state.archiveError,
-              score: state.scoresByRound.get('01')?.get('qa-archive-viewer')?.score,
               toast: document.getElementById('toastContainer').textContent };
           })()`);
           if (!observed.error.includes('QA 模拟磁盘写入失败')
-            || observed.score !== 8.1
-            || !observed.toast.includes('存档写入失败')) {
+            || !observed.toast.includes('播放记录写入失败')) {
             throw new Error(`存档失败未向节目提示：${JSON.stringify(observed)}`);
           }
           archiveStore.append = originalAppend;
@@ -490,7 +491,7 @@ function createWindow() {
           const feedback = await backstageWindow.webContents.executeJavaScript(
             `document.getElementById('status').textContent`,
           );
-          if (!feedback.includes('存档写入失败')) throw new Error(`后台没有存档失败提示：${feedback}`);
+          if (!feedback.includes('播放记录写入失败')) throw new Error(`后台没有存档失败提示：${feedback}`);
           dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportPath });
           const exported = await backstageWindow.webContents.executeJavaScript(
             `window.backstageApi.exportArchiveCsv(${JSON.stringify(sessionId)})`,
@@ -542,7 +543,7 @@ function createWindow() {
             cardText: document.getElementById('descriptionCard')?.textContent.trim(),
             hidden: document.getElementById('descriptionCard')?.hidden
           })`);
-          if (!shown.label?.startsWith('TRACK') || shown.text !== '后台实时修改的歌曲简介'
+          if (!/^TRACK \d+$/.test(shown.label) || shown.text !== '后台实时修改的歌曲简介'
             || shown.cardText !== shown.text || shown.hidden) {
             throw new Error(`简介未同步到节目画面: ${JSON.stringify(shown)}`);
           }
@@ -571,7 +572,6 @@ function createWindow() {
           await backstageWindow.webContents.executeJavaScript(`(async () => {
             await window.backstageApi.command('volume', { value: 0.35 });
             await window.backstageApi.command('comment-opacity', { value: 47 });
-            await window.backstageApi.command('submit-score', { name: '后台观众', message: '#01 8.3' });
             await window.backstageApi.command('import', { items: [{
               id: 'qa-imported-track', path: 'qa-imported.wav', url: 'file:///qa-imported.wav',
               type: 'audio', title: '后台导入曲目', artist: '', duration: 0, coverDataUrl: ''
@@ -581,12 +581,11 @@ function createWindow() {
           const controls = await mainWindow.webContents.executeJavaScript(`({
             volume: Number(document.getElementById('volumeInput').value),
             opacity: Number(document.getElementById('commentOpacityInput').value),
-            playlistCount: document.querySelectorAll('.playlist-item').length,
-            score: [...state.scoresByRound.get('01').values()].find((entry) => entry.uname === '后台观众')?.score
+            playlistCount: document.querySelectorAll('.playlist-item').length
           })`);
           if (Math.abs(controls.volume - 0.35) > 0.01
             || controls.opacity !== 47
-            || controls.playlistCount !== 2 || controls.score !== 8.3) {
+            || controls.playlistCount !== 2) {
             throw new Error(`后台控制未同步到节目: ${JSON.stringify(controls)}`);
           }
           await mainWindow.webContents.executeJavaScript(
@@ -647,12 +646,12 @@ function createWindow() {
           const metadata = await mainWindow.webContents.executeJavaScript(`({
             title: document.getElementById('trackTitle').textContent,
             submitter: document.getElementById('trackSubmitter').textContent,
-            genre: document.getElementById('trackGenre').textContent,
+            genre: state.tracks[0].genre,
             creator: document.getElementById('trackArtist').textContent,
             playlistTitle: document.querySelector('.playlist-item strong')?.textContent,
           })`);
           if (metadata.title !== '后台更新的曲名' || metadata.submitter !== '后台投稿人'
-            || metadata.genre !== '电子' || metadata.creator !== '艺人：The Afterglow'
+            || metadata.genre !== '电子' || metadata.creator !== 'The Afterglow'
             || metadata.playlistTitle !== '后台更新的曲名') {
             throw new Error(`后台曲目信息未同步: ${JSON.stringify(metadata)}`);
           }
@@ -853,24 +852,6 @@ function createWindow() {
           if (cover.trackCover !== coverDataUrl || cover.displayedCover !== coverDataUrl) {
             throw new Error('后台导入的封面没有同步到节目画面');
           }
-          const revisedScore = await mainWindow.webContents.executeJavaScript(`(() => {
-            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 5.0', msg_id: 'qa-repeat-1' });
-            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 9.0', msg_id: 'qa-repeat-2' });
-            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#01 1.0', msg_id: 'qa-repeat-2' });
-            processScoreInput({ open_id: 'qa-repeat', uname: '重复评分观众', msg: '#02 6.0', msg_id: 'qa-repeat-3' });
-            return {
-              score: state.scoresByRound.get('01')?.get('qa-repeat')?.score,
-              otherTrackScore: state.scoresByRound.get('02')?.get('qa-repeat')?.score,
-              count: state.scoresByRound.get('01')?.size,
-              average: document.getElementById('averageScore').textContent,
-              visible: document.querySelector('.score-card').textContent.trim(),
-            };
-          })()`);
-          if (revisedScore.score !== 9 || revisedScore.otherTrackScore !== 6
-            || revisedScore.count !== 5 || revisedScore.average !== '8.7'
-            || revisedScore.visible !== '8.7') {
-            throw new Error(`重复评分未覆盖旧消息: ${JSON.stringify(revisedScore)}`);
-          }
           const exportPath = path.join(app.getPath('temp'), `lets-listen-export-qa-${randomUUID()}.csv`);
           const originalSaveDialog = dialog.showSaveDialog;
           try {
@@ -879,18 +860,12 @@ function createWindow() {
               `window.backstageApi.exportArchiveCsv(${JSON.stringify(backstageState.sessionId)})`,
             );
             const csv = await fs.readFile(exportPath, 'utf8');
-            if (exportResult.count < 2 || !csv.includes('qa-repeat-1') || !csv.includes('qa-repeat-2')) {
-              throw new Error('后台立即导出遗漏了尚在写入队列中的评分');
+            if (exportResult.count < 2 || !csv.includes('track_metadata_updated')) {
+              throw new Error('后台立即导出遗漏了曲目信息记录');
             }
           } finally {
             dialog.showSaveDialog = originalSaveDialog;
             await fs.rm(exportPath, { force: true });
-          }
-          await mainWindow.webContents.executeJavaScript(`state.archiveQueue`);
-          const archivePath = archiveStore.sessions.get(backstageState.sessionId);
-          const archiveText = await fs.readFile(archivePath, 'utf8');
-          if (!archiveText.includes('qa-repeat-1') || !archiveText.includes('qa-repeat-2')) {
-            throw new Error('重复评分没有完整写入原始存档');
           }
           await backstageWindow.webContents.executeJavaScript(
             `window.backstageApi.updateTrack(${JSON.stringify({
@@ -1072,6 +1047,33 @@ function createWindow() {
 
 function registerIpc() {
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), dataPath: app.getPath('userData') }));
+  ipcMain.handle('foobar:choose-executable', async (event) => {
+    if (![mainWindow?.webContents, backstageWindow?.webContents].includes(event.sender)) throw new Error('无权选择播放器');
+    const result = await dialog.showOpenDialog(dialogOwner(event), {
+      title: '选择 foobar2000 主程序', properties: ['openFile'],
+      filters: [{ name: 'foobar2000', extensions: ['exe'] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return '';
+    const selected = result.filePaths[0];
+    if (!/^foobar2000\.exe$/i.test(path.basename(selected))) throw new Error('请选择 foobar2000.exe');
+    foobarExecutable = selected;
+    await fs.writeFile(foobarConfigPath(), JSON.stringify({ executable: selected }), 'utf8');
+    return selected;
+  });
+  ipcMain.handle('foobar:open', async (event, filePath) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('无权启动 foobar2000');
+    const source = String(filePath || '');
+    if (!path.isAbsolute(source) || !(await fs.stat(source).catch(() => null))?.isFile()) throw new Error('音频文件不存在');
+    if (!(await fs.stat(foobarExecutable).catch(() => null))?.isFile()) {
+      throw new Error('未找到 foobar2000，请在直播后台选择 foobar2000.exe');
+    }
+    return foobar.open(foobarExecutable, source);
+  });
+  ipcMain.handle('foobar:command', async (event, type, args) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('无权控制 foobar2000');
+    if (!['play', 'pause', 'seek', 'volume', 'close'].includes(type)) throw new Error('不支持的 foobar2000 操作');
+    return type === 'close' ? foobar.close() : foobar.command(type, args);
+  });
   ipcMain.handle('backstage:open', (event) => {
     if (event.sender !== mainWindow?.webContents) throw new Error('仅节目窗口可打开简介后台');
     openBackstageWindow();
@@ -1085,8 +1087,8 @@ function registerIpc() {
     if (event.sender !== mainWindow?.webContents) throw new Error('无权发布后台状态');
     backstageState = {
       currentTrackId: String(snapshot?.currentTrackId || ''),
-      themeAccent: /^#[0-9a-f]{6}$/i.test(snapshot?.themeAccent) ? snapshot.themeAccent : '#d8ff3e',
-      themeHover: /^#[0-9a-f]{6}$/i.test(snapshot?.themeHover) ? snapshot.themeHover : '#e5ff72',
+      themeAccent: /^#[0-9a-f]{6}$/i.test(snapshot?.themeAccent) ? snapshot.themeAccent : '#ffffff',
+      themeHover: /^#[0-9a-f]{6}$/i.test(snapshot?.themeHover) ? snapshot.themeHover : '#e9e9e9',
       tracks: (Array.isArray(snapshot?.tracks) ? snapshot.tracks : []).slice(0, 500).map((track) => ({
         id: String(track.id || ''),
         number: String(track.number || ''),
@@ -1107,6 +1109,7 @@ function registerIpc() {
         duration: Number(snapshot?.playback?.duration || 0),
         paused: Boolean(snapshot?.playback?.paused),
         volume: Number(snapshot?.playback?.volume ?? 0.85),
+        audioEngine: snapshot?.playback?.audioEngine === 'foobar' ? 'foobar' : 'builtin',
         commentOpacity: Number(snapshot?.playback?.commentOpacity ?? 72),
         programMode: Boolean(snapshot?.playback?.programMode),
       },
@@ -1153,7 +1156,8 @@ function registerIpc() {
     if (event.sender !== backstageWindow?.webContents) throw new Error('无权操作节目');
     const allowed = new Set([
       'import', 'select-track', 'play-pause', 'previous', 'next', 'seek', 'volume',
-      'comment-opacity', 'submit-score', 'leave-program', 'save-playlist', 'open-playlist',
+      'comment-opacity', 'leave-program', 'save-playlist', 'open-playlist',
+      'audio-engine', 'reorder-track',
     ]);
     if (!allowed.has(command?.type)) throw new Error('不支持的后台操作');
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('节目窗口已关闭');
@@ -1211,7 +1215,7 @@ function registerIpc() {
     const loaded = await loadPlaylistFile(selected.filePaths[0]);
     if (backstageState.tracks.length || loaded.missing.length) {
       const detail = [
-        backstageState.tracks.length ? `当前 ${backstageState.tracks.length} 首曲目会被替换；本场评分不会恢复。` : '',
+        backstageState.tracks.length ? `当前 ${backstageState.tracks.length} 首曲目会被替换。` : '',
         loaded.missing.length ? `有 ${loaded.missing.length} 首媒体无法读取，将跳过：${loaded.missing.slice(0, 3).join('、')}${loaded.missing.length > 3 ? '…' : ''}` : '',
         `可导入 ${loaded.tracks.length} 首曲目。`,
       ].filter(Boolean).join('\n');
@@ -1237,8 +1241,8 @@ function registerIpc() {
   ipcMain.handle('archive:finish', (_event, sessionId, summary) => archiveStore.finishSession(sessionId, summary));
   ipcMain.handle('archive:export-csv', async (event, sessionId) => {
     const result = await dialog.showSaveDialog(dialogOwner(event), {
-      title: '导出评分存档',
-      defaultPath: `品味大战-${new Date().toISOString().slice(0, 10)}.csv`,
+      title: '导出播放记录',
+      defaultPath: `lets-listen-播放记录-${new Date().toISOString().slice(0, 10)}.csv`,
       filters: [{ name: 'CSV 表格', extensions: ['csv'] }],
     });
     if (result.canceled || !result.filePath) return null;
@@ -1337,7 +1341,13 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  try {
+    const saved = JSON.parse(await fs.readFile(foobarConfigPath(), 'utf8'));
+    if (typeof saved.executable === 'string' && /^foobar2000\.exe$/i.test(path.basename(saved.executable))) {
+      foobarExecutable = saved.executable;
+    }
+  } catch { /* Keep the requested default path. */ }
   const qaArchiveRoot = process.argv.some((argument) => argument.startsWith('--qa-'))
     ? process.env.LETS_LISTEN_QA_ARCHIVE : '';
   archiveStore = new ArchiveStore(qaArchiveRoot || path.join(app.getPath('documents'), '品味大战存档'));
@@ -1350,6 +1360,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', (event) => {
+  foobar.close().catch((error) => console.error('foobar2000 close failed', error));
   if (streamController.starting || streamController.child) {
     streamController.abort('软件退出，推流结束');
   }

@@ -4,6 +4,14 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('tasteArena', {
   appInfo: () => ipcRenderer.invoke('app:info'),
+  foobarOpen: (path) => ipcRenderer.invoke('foobar:open', path),
+  foobarCommand: (type, args) => ipcRenderer.invoke('foobar:command', type, args),
+  chooseFoobar: () => ipcRenderer.invoke('foobar:choose-executable'),
+  onFoobarState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('foobar:state', listener);
+    return () => ipcRenderer.removeListener('foobar:state', listener);
+  },
   selectMedia: () => ipcRenderer.invoke('media:select'),
   inspectMedia: (paths) => ipcRenderer.invoke('media:inspect', paths),
   savePlaylist: (snapshot) => ipcRenderer.invoke('playlist:save', snapshot),
