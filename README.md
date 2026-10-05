@@ -23,15 +23,6 @@ npm run dev
 npm run check
 ```
 
-本地歌曲、封面、歌单和测试文件不会提交到仓库；请自行保存这些资料。
-
-生成 Windows 发行目录：
-
-```powershell
-npm run dist
-```
-
-打包会使用 `npm install` 安装在本地的 Electron 发行文件，避免重复下载和解压 Electron。
 
 ## foobar2000 音频
 
